@@ -14,6 +14,8 @@ from pprint import pprint
 #from groundprogram import ClingoRule
 import os
 import inspect
+import logging
+import subprocess
 
 # set library path
 
@@ -23,17 +25,19 @@ sys.path.insert(0, os.path.realpath(os.path.join(src_path, '../..')))
 
 src_path = os.path.realpath(os.path.join(src_path, '../../lib'))
 
-libs = ['htd_validate', 'clingoparser']
+libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd']
 
 if src_path not in sys.path:
     for lib in libs:
         sys.path.insert(0, os.path.join(src_path, lib))
 
-print(sys.path)
+logger = logging.getLogger("asp2sat")
 
 from htd_validate.utils import hypergraph
 import clingoext
 from clingoext import ClingoRule
+#from htd_validate.decompositions import *
+from dpdb import reader
 
 class AppConfig(object):
     """
@@ -75,7 +79,22 @@ class Application(object):
                 #self._graph.add_edges_from(edges)
 
     def _decomposeGraph(self):
-        pass
+        # Run htd
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        #logger.info("Parsing input file")
+        #input = problem.prepare_input(file)
+        #if "gr_file" in kwargs and kwargs["gr_file"]:
+        #    logger.info("Writing graph file")
+        #    with FileWriter(kwargs["gr_file"]) as fw:
+        #        fw.write_gr(*input)
+        logger.info("Running htd")
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        #with open('graph.txt', mode='wb') as file_out:
+        #    self._graph.write_gr(file_out)
+        p.stdin.close()
+        self._td = reader.TdReader.from_stream(p.stdout)
+        p.wait()
+        logger.info("TD computed")
 
     def main(self, clingo_control, files):
         """
@@ -92,16 +111,16 @@ class Application(object):
 
         self.control.ground()
 
-        print("------------------------------------------------------------")
-        print("   Grounded Program")
-        print("------------------------------------------------------------")
-        pprint(self.control.ground_program.objects)
-        print("------------------------------------------------------------")
-        print(self.control.ground_program)
-        print("-------------------------------------------------------------")
+        logger.info("------------------------------------------------------------")
+        logger.info("   Grounded Program")
+        logger.info("------------------------------------------------------------")
+        #pprint(self.control.ground_program.objects)
+        logger.info("------------------------------------------------------------")
+        logger.info(self.control.ground_program)
+        logger.info("-------------------------------------------------------------")
 
         self._generatePrimalGraph()
-        print(self._graph.edges())
+        logger.info(self._graph.edges())
 
 
         self._decomposeGraph()
