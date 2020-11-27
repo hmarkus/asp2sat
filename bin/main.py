@@ -32,12 +32,14 @@ if src_path not in sys.path:
         sys.path.insert(0, os.path.join(src_path, lib))
 
 logger = logging.getLogger("asp2sat")
+logging.basicConfig(format='[%(levelname)s] %(name)s: %(message)s', level="INFO")
 
 from htd_validate.utils import hypergraph
 import clingoext
 from clingoext import ClingoRule
 #from htd_validate.decompositions import *
 from dpdb import reader
+from dpdb import treedecomp
 
 class AppConfig(object):
     """
@@ -92,9 +94,11 @@ class Application(object):
         #with open('graph.txt', mode='wb') as file_out:
         #    self._graph.write_gr(file_out)
         p.stdin.close()
-        self._td = reader.TdReader.from_stream(p.stdout)
+        tdr = reader.TdReader.from_stream(p.stdout)
         p.wait()
         logger.info("TD computed")
+        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(self._td.nodes)
 
     def main(self, clingo_control, files):
         """
