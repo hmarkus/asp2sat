@@ -100,6 +100,20 @@ class Application(object):
         self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(self._td.nodes)
 
+    def _tdguidedReduction(self):
+        # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
+        # this is the case if there is a rule suitable for proving a in or below t
+        prove_atoms = {}
+        # maps a node t to a set of rules that need to be considered in t
+        # it actually suffices if every rule is considered only once in the entire td..
+        rules = {}
+        # first td pass: determine rules and prove_atoms
+        for t in self._td:
+            pass
+        # second td pass: use rules and prove_atoms to generate the reduction
+        for t in self._td:
+            pass
+
     def main(self, clingo_control, files):
         """
         Entry point of the application registering the propagator and
@@ -121,13 +135,14 @@ class Application(object):
         #pprint(self.control.ground_program.objects)
         logger.info("------------------------------------------------------------")
         logger.info(self.control.ground_program)
-        logger.info("-------------------------------------------------------------")
+        logger.info("------------------------------------------------------------")
 
         self._generatePrimalGraph()
         logger.info(self._graph.edges())
 
 
         self._decomposeGraph()
+        self._tdguidedReduction()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
