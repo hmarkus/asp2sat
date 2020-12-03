@@ -72,11 +72,15 @@ class Application(object):
 
     def _generatePrimalGraph(self):
         self._graph = hypergraph.Hypergraph()
+        self._program = []
         for o in self.control.ground_program.objects:
             if isinstance(o, ClingoRule):
-                atoms = list(o.head)
-                atoms.extend(o.body)
-                self._graph.add_hyperedge(atoms)
+                o.atoms = set(o.head)
+                o.atoms.add(set(map(abs, o.body)))
+                #atoms = list(o.head)
+                #atoms.extend(o.body)
+                self._graph.add_hyperedge(o.atoms)
+                self._program.add(o)
                 #edges = ((abs(a),abs(b)) for a in atoms for b in atoms if abs(a) > abs(b))
                 #self._graph.add_edges_from(edges)
 
@@ -107,9 +111,26 @@ class Application(object):
         # maps a node t to a set of rules that need to be considered in t
         # it actually suffices if every rule is considered only once in the entire td..
         rules = {}
+        # temporary copy of the program, will be empty after the first pass
+        program = list(self._program)
         # first td pass: determine rules and prove_atoms
         for t in self._td:
-            pass
+            prove_atoms[t] = set()
+            rules[t] = []
+            # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
+            for tp in t.children:
+                prove_atoms[t].update(prove_atoms[tp].intersection(t.vertices))
+            # FIXME: python does not have c++-like enumerator to modify list during iteration, right?
+            i = 0
+            while i < len(program):
+                r = program[i]
+                if r.atoms in t.vertices:
+                    prove_atoms[t].update(r.head)
+                    rules[t].append(r)
+                    program.remove(r)
+                    i -= 1
+                i += 1
+
         # second td pass: use rules and prove_atoms to generate the reduction
         for t in self._td:
             pass
