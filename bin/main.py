@@ -31,10 +31,12 @@ if src_path not in sys.path:
     for lib in libs:
         sys.path.insert(0, os.path.join(src_path, lib))
 
+
 logger = logging.getLogger("asp2sat")
 logging.basicConfig(format='[%(levelname)s] %(name)s: %(message)s', level="INFO")
 
 from htd_validate.utils import hypergraph
+
 import clingoext
 from clingoext import ClingoRule
 #from htd_validate.decompositions import *
@@ -76,11 +78,11 @@ class Application(object):
         for o in self.control.ground_program.objects:
             if isinstance(o, ClingoRule):
                 o.atoms = set(o.head)
-                o.atoms.add(set(map(abs, o.body)))
+                o.atoms.update(tuple(map(abs, o.body)))
                 #atoms = list(o.head)
                 #atoms.extend(o.body)
                 self._graph.add_hyperedge(o.atoms)
-                self._program.add(o)
+                self._program.append(o)
                 #edges = ((abs(a),abs(b)) for a in atoms for b in atoms if abs(a) > abs(b))
                 #self._graph.add_edges_from(edges)
 
