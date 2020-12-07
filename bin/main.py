@@ -292,7 +292,7 @@ class Application(object):
                         for a in r.head:
                             if a != x:
                                 cp = clause_writer(cur, c1 = -a)
-
+                                cur = cp[1]
 
                 tmp = str(-c[1]) + " "
                 for v in include:
