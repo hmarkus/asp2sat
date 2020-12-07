@@ -88,18 +88,8 @@ class Application(object):
                 o.atoms = set(o.head)
                 o.atoms.update(tuple(map(abs, o.body)))
                 self._max = max(self._max, max(o.atoms))
-                if len(o.atoms) > 1: # trivial rules / facts do not need to be considered
-                    for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                        vertex = len(self._atomToVertex) + 1
-                        self._atomToVertex[a] = vertex
-                        self._vertexToAtom[vertex] = a
-                    #atoms = list(o.head)
-                    #print(self._atomToVertex)
-                    #atoms.extend(o.body)
-                    self._program.append(o)
-                    self._graph.add_hyperedge(tuple(map(lambda x: self._atomToVertex[x], o.atoms)))
-                    #edges = ((abs(a),abs(b)) for a in atoms for b in atoms if abs(a) > abs(b))
-                    #self._graph.add_edges_from(edges)
+                self._program.append(o)
+                self._graph.add_hyperedge(tuple(o.atoms))
 
     def _decomposeGraph(self):
         # Run htd
@@ -122,6 +112,10 @@ class Application(object):
         logger.info(self._td.nodes)
 
     def _tdguidedReduction(self):
+        # which variables NOT to project away
+        self._projected_cutoff = self._max
+        # store the clauses here
+        self._clauses = []
         # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
         # this is the case if there is a rule suitable for proving a in or below t
         prove_atoms = {}
@@ -141,7 +135,7 @@ class Application(object):
             proven_below_atoms[t] = {}
             proven_at_atoms[t] = {}
             # compute t.atoms
-            t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
+            t.atoms = set(t.vertices)
             # generate the variables for the bits for each atom of the node
             count = math.ceil(math.log(len(t.atoms)))
             bits[t] = (count, {})
@@ -154,40 +148,27 @@ class Application(object):
                 for a in prove_atoms[tp].intersection(t.atoms):
                     if a not in proven_below_atoms[t]:
                         proven_below_atoms[t][a] = self.new_var();
-            # FIXME: python does not have c++-like enumerator to modify list during iteration, right?
-            i = 0
-            while i < len(program):
-                r = program[i]
-                #print(r, r.atoms, t.atoms)
-                if r.atoms.issubset(t.atoms):
-                    #print("subset")
-                    prove_atoms[t].update(r.head)
-                    for a in r.head:
-                        if a not in proven_at_atoms:
-                            proven_at_atoms[t][a] = self.new_var()
-                        if a not in proven_below_atoms[t]:
-                            proven_below_atoms[t][a] = self.new_var();
-                    rules[t].append(r)
-                    program.remove(r)
-                    i -= 1
-                i += 1
+            # FIXME: python does not have c++-like enumerator to modify list during iteration, right? 
+            # I think not. What about this though?
+            subprog = [r for r in program if r.atoms.issubset(t.atoms)]
+            program = [r for r in program if not r.atoms.issubset(t.atoms)]
+            for r in subprog:
+                prove_atoms[t].update(r.head)
+                for a in r.head:
+                    if a not in proven_at_atoms:
+                        proven_at_atoms[t][a] = self.new_var()
+                    if a not in proven_below_atoms[t]:
+                        proven_below_atoms[t][a] = self.new_var();
+                rules[t].append(r)
         logger.info("program")
         logger.info(rules)
         logger.info("prove_atoms")
         logger.info(prove_atoms)
-        logger.info("atoms to vertices")
-        logger.info(self._atomToVertex)
-        logger.info("bits for atoms")
-        logger.info(bits)
         # second td pass: use rules and prove_atoms to generate the reduction
         for t in self._td.nodes:
             # generate the clauses for the rules in the current node
             for r in rules[t]:
-                for a in r.head:
-                    print(a, end=" ")
-                for a in r.body:
-                    print(-a, end=" ")
-                print(0)
+                self._clauses.append(r.head + r.body)
 
             # write a single clause
             # connective == 0 -> and, == 1 -> or, == 2 -> impl
@@ -197,17 +178,17 @@ class Application(object):
                 if c2 == 0:
                     c2 = self.new_var()
                 if connective == 0:
-                    print(f"{-p} {c1} 0")
-                    print(f"{-p} {c2} 0")
-                    print(f"{p} {-c1} {-c2} 0")
+                    self._clauses.append([-p, c1])
+                    self._clauses.append([-p, c2])
+                    self._clauses.append([p, -c1, -c2])
                 if connective == 1:
-                    print(f"{p} {-c1} 0")
-                    print(f"{p} {-c2} 0")
-                    print(f"{-p} {c1} {c2} 0")
+                    self._clauses.append([p, -c1])
+                    self._clauses.append([p, -c2])
+                    self._clauses.append([p, c1, c2])
                 if connective == 2:
-                    print(f"{p} {c1} 0")
-                    print(f"{p} {-c2} 0")
-                    print(f"{-p} {-c1} {c2} 0")
+                    self._clauses.append([p, c1])
+                    self._clauses.append([p, -c2])
+                    self._clauses.append([-p, -c1, c2])
                 if connective == 3:
                     c = clause_writer(p)
                     clause_writer(c[0], c1 = c1, c2 = c2, connective = 2)
@@ -230,7 +211,7 @@ class Application(object):
                         curA = c[1]
                         clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2)
                 # make sure that the disjunction is not trivially satisfied
-                print(f"{-cur} 0")
+                self._clauses.append([-cur])
                          
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
@@ -239,7 +220,7 @@ class Application(object):
                 for x, xp in product(relevant, relevant):
                     if x == xp:
                         continue
-                    print(f"{self.new_var()} 0")
+                    self._clauses.append([self.new_var()])
                     c = clause_writer(self._max, connective = 3)
                     generateLessThan(x, xp, t, c[0])
                     generateLessThan(x, xp, tp, c[1])
@@ -249,15 +230,15 @@ class Application(object):
                 relevant = tp.atoms.difference(t.atoms)
                 for a in relevant:
                     if a in proven_below_atoms[tp]:
-                        print(f"{self.new_var()} 0")
+                        self._clauses.append([self.new_var()])
                         clause_writer(self._max, c1 = a, c2 = proven_below_atoms[tp][a], connective = 2)
                     else:
                         # FIXME: if we do not have a possibility to prove that a is stable, we can assert it to be false
-                        print(f"{-a} 0")
+                        self._clauses.append([-a])
             
             # generate (5), i.e. the propogation of things that were proven
             for a in prove_atoms[t]:
-                print(f"{self.new_var()} 0")
+                self._clauses.append([self.new_var()])
                 c = clause_writer(self._max, c1 = proven_below_atoms[t][a], connective = 3)
                 include = []
                 if a in proven_at_atoms[t]:
@@ -265,15 +246,13 @@ class Application(object):
                 for tp in t.children:
                     if a in prove_atoms[tp]:
                         include.append(proven_below_atoms[tp][a])
-                tmp = str(-c[1]) + " "
+                self._clauses.append([-c[1]] + include)
                 for v in include:
-                    print(f"{c[1]} {-v} 0")
-                    tmp += f"{v} "
-                print(tmp + "0")
+                    self._clauses.append([c[1], -v])
 
             # generate (6), i.e. the check for whether an atom was proven at the current node
             for x in proven_at_atoms[t]:
-                print(f"{self.new_var()} 0")
+                self._clauses.append([self.new_var()])
                 c = clause_writer(self._max, c1 = proven_at_atoms[t][x], connective = 3)
                 include = []
                 for r in rules[t]:
@@ -295,24 +274,24 @@ class Application(object):
                             if a != x:
                                 cp = clause_writer(cur, c1 = -a)
                                 cur = cp[1]
-
-                tmp = str(-c[1]) + " "
+                self._clauses.append([-c[1]] + include)
                 for v in include:
-                    print(f"{c[1]} {-v} 0")
-                    tmp += f"{v} "
-                print(tmp + "0")
-                
-                
+                    self._clauses.append([c[1], -v])
             
         # generate (4), i.e. the constraints that ensure that true atoms in the root are proven
         for a in self._td.root.atoms:
             if a in proven_below_atoms[self._td.root]:
-                print(f"{self.new_var()} 0")
+                self._clauses.append([self.new_var()])
                 clause_writer(self._max, c1 = a, c2 = proven_below_atoms[self._td.root][a], connective = 2)
             else:
-                print(f"{-a} 0")
+                self._clauses.append([-a])
 
-
+    def write_dimacs(self, stream):
+        stream.write(f"p pcnf {self._max} {len(self._clauses)} {self._projected_cutoff}\n".encode())
+        stream.write(("vp " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + "\n" ).encode())
+        for c in self._clauses:
+            stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+        
                     
 
     def main(self, clingo_control, files):
@@ -344,6 +323,8 @@ class Application(object):
 
         self._decomposeGraph()
         self._tdguidedReduction()
+        with open('out.cnf', mode='wb') as file_out:
+            self.write_dimacs(file_out)
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
