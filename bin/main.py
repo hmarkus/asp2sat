@@ -184,9 +184,9 @@ class Application(object):
             # generate the clauses for the rules in the current node
             for r in rules[t]:
                 for a in r.head:
-                    print(-a, end=" ")
-                for a in r.body:
                     print(a, end=" ")
+                for a in r.body:
+                    print(-a, end=" ")
                 print(0)
 
             # write a single clause
@@ -229,6 +229,8 @@ class Application(object):
                         c = clause_writer(curA)
                         curA = c[1]
                         clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2)
+                # make sure that the disjunction is not trivially satisfied
+                print(f"{-cur} 0")
                          
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
