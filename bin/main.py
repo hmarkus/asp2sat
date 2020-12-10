@@ -44,6 +44,8 @@ from clingoext import ClingoRule
 from dpdb import reader
 from dpdb import treedecomp
 
+import wfParse
+
 class AppConfig(object):
     """
     Class for application specific options.
@@ -63,6 +65,7 @@ class Application(object):
         self.program_name = "clingoext"
         self.version = "0.0.1"
         self.config = AppConfig()
+        self._weights = {}
 
     def _read(self, path):
         if path == "-":
@@ -72,6 +75,12 @@ class Application(object):
 
     def primalGraph(self):
         return self._graph
+
+    def var2idx(self, var):
+        sym = clingo.parse_term(var)
+        if sym in self.control.symbolic_atoms:
+            return self.control.symbolic_atoms[sym].literal
+        return 0
 
     def new_var(self):
         self._max += 1
@@ -110,6 +119,42 @@ class Application(object):
         logger.info("TD computed")
         self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(self._td.nodes)
+
+
+    # write a single clause
+    # connective == 0 -> and, == 1 -> or, == 2 -> impl, == 3 -> iff, == 4 -> *, == 5 -> +
+    def clause_writer(self, p, c1 = 0, c2 = 0, connective = 0):
+        if c1 == 0:
+            c1 = self.new_var()
+        if c2 == 0:
+            c2 = self.new_var()
+        if connective == 0:
+            self._clauses.append([-p, c1])
+            self._clauses.append([-p, c2])
+            self._clauses.append([p, -c1, -c2])
+        if connective == 1:
+            self._clauses.append([p, -c1])
+            self._clauses.append([p, -c2])
+            self._clauses.append([-p, c1, c2])
+        if connective == 2:
+            self._clauses.append([p, c1])
+            self._clauses.append([p, -c2])
+            self._clauses.append([-p, -c1, c2])
+        if connective == 3:
+            c = self.clause_writer(p)
+            self.clause_writer(c[0], c1 = c1, c2 = c2, connective = 2)
+            self.clause_writer(c[1], c1 = c2, c2 = c1, connective = 2)
+        if connective == 4:
+            self._clauses.append([-p, c1])
+            self._clauses.append([-p, c2])
+            self._clauses.append([p, -c1])
+            self._clauses.append([p, -c2])
+        if connective == 5:
+            self._clauses.append([p, -c1])
+            self._clauses.append([p, -c2])
+            self._clauses.append([-p, c1, c2])
+            self._clauses.append([-p, -c1, -c2])
+        return (c1, c2)
 
     def _tdguidedReduction(self):
         # which variables NOT to project away
@@ -170,46 +215,21 @@ class Application(object):
             for r in rules[t]:
                 self._clauses.append(r.head + r.body)
 
-            # write a single clause
-            # connective == 0 -> and, == 1 -> or, == 2 -> impl
-            def clause_writer(p, c1 = 0, c2 = 0, connective = 0):
-                if c1 == 0:
-                    c1 = self.new_var()
-                if c2 == 0:
-                    c2 = self.new_var()
-                if connective == 0:
-                    self._clauses.append([-p, c1])
-                    self._clauses.append([-p, c2])
-                    self._clauses.append([p, -c1, -c2])
-                if connective == 1:
-                    self._clauses.append([p, -c1])
-                    self._clauses.append([p, -c2])
-                    self._clauses.append([-p, c1, c2])
-                if connective == 2:
-                    self._clauses.append([p, c1])
-                    self._clauses.append([p, -c2])
-                    self._clauses.append([-p, -c1, c2])
-                if connective == 3:
-                    c = clause_writer(p)
-                    clause_writer(c[0], c1 = c1, c2 = c2, connective = 2)
-                    clause_writer(c[1], c1 = c2, c2 = c1, connective = 2)
-                return (c1, c2)
-
             # a subroutine to generate x < x'
             def generateLessThan(x, xp, node, myId):
                 count = bits[node][0]
                 l_bits = bits[node][1]
                 cur = myId
                 for i in range(count):
-                    c = clause_writer(cur, connective = 1)
+                    c = self.clause_writer(cur, connective = 1)
                     cur = c[1]
-                    c = clause_writer(c[0], c1 = l_bits[xp][i])
-                    c = clause_writer(c[1], c1 = -l_bits[x][i])
+                    c = self.clause_writer(c[0], c1 = l_bits[xp][i])
+                    c = self.clause_writer(c[1], c1 = -l_bits[x][i])
                     curA = c[1]
                     for j in range(i + 1, count):
-                        c = clause_writer(curA)
+                        c = self.clause_writer(curA)
                         curA = c[1]
-                        clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2)
+                        self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2)
                 # make sure that the disjunction is not trivially satisfied
                 self._clauses.append([-cur])
                          
@@ -221,7 +241,7 @@ class Application(object):
                     if x == xp:
                         continue
                     self._clauses.append([self.new_var()])
-                    c = clause_writer(self._max, connective = 3)
+                    c = self.clause_writer(self._max, connective = 3)
                     generateLessThan(x, xp, t, c[0])
                     generateLessThan(x, xp, tp, c[1])
             
@@ -231,7 +251,7 @@ class Application(object):
                 for a in relevant:
                     if a in proven_below_atoms[tp]:
                         self._clauses.append([self.new_var()])
-                        clause_writer(self._max, c1 = a, c2 = proven_below_atoms[tp][a], connective = 2)
+                        self.clause_writer(self._max, c1 = a, c2 = proven_below_atoms[tp][a], connective = 2)
                     else:
                         # FIXME: if we do not have a possibility to prove that a is stable, we can assert it to be false
                         self._clauses.append([-a])
@@ -239,7 +259,7 @@ class Application(object):
             # generate (5), i.e. the propogation of things that were proven
             for a in prove_atoms[t]:
                 self._clauses.append([self.new_var()])
-                c = clause_writer(self._max, c1 = proven_below_atoms[t][a], connective = 3)
+                c = self.clause_writer(self._max, c1 = proven_below_atoms[t][a], connective = 3)
                 include = []
                 if a in proven_at_atoms[t]:
                     include.append(proven_at_atoms[t][a])
@@ -253,7 +273,7 @@ class Application(object):
             # generate (6), i.e. the check for whether an atom was proven at the current node
             for x in proven_at_atoms[t]:
                 self._clauses.append([self.new_var()])
-                c = clause_writer(self._max, c1 = proven_at_atoms[t][x], connective = 3)
+                c = self.clause_writer(self._max, c1 = proven_at_atoms[t][x], connective = 3)
                 include = []
                 for r in rules[t]:
                     if x in r.head:
@@ -261,18 +281,18 @@ class Application(object):
                         cur = self._max
                         for a in r.body:
                             if a > 0:
-                                cp = clause_writer(cur, c1 = a)
+                                cp = self.clause_writer(cur, c1 = a)
                                 # FIXME: can this not be moved outside?
-                                cp = clause_writer(cp[1], c1 = x)
-                                cp = clause_writer(cp[1])
+                                cp = self.clause_writer(cp[1], c1 = x)
+                                cp = self.clause_writer(cp[1])
                                 generateLessThan(a, x, t, cp[0])
                                 cur = cp[1]
                             if a < 0:
-                                cp = clause_writer(cur, c1 = a)
+                                cp = self.clause_writer(cur, c1 = a)
                                 cur = cp[1]
                         for a in r.head:
                             if a != x:
-                                cp = clause_writer(cur, c1 = -a)
+                                cp = self.clause_writer(cur, c1 = -a)
                                 cur = cp[1]
                 self._clauses.append([-c[1]] + include)
                 for v in include:
@@ -282,16 +302,18 @@ class Application(object):
         for a in self._td.root.atoms:
             if a in proven_below_atoms[self._td.root]:
                 self._clauses.append([self.new_var()])
-                clause_writer(self._max, c1 = a, c2 = proven_below_atoms[self._td.root][a], connective = 2)
+                self.clause_writer(self._max, c1 = a, c2 = proven_below_atoms[self._td.root][a], connective = 2)
             else:
                 self._clauses.append([-a])
 
 
     def write_dimacs(self, stream):
         stream.write(f"p pcnf {self._max} {len(self._clauses)} {self._projected_cutoff}\n".encode())
-        stream.write(("vp " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + "\n" ).encode())
+        stream.write(("vp " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + " 0\n" ).encode())
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+        for (a, w) in self._weights.items():
+            stream.write(f"w {a} {w}\n".encode())
         
                     
 
@@ -324,6 +346,9 @@ class Application(object):
 
         self._decomposeGraph()
         self._tdguidedReduction()
+        parser = wfParse.WeightedFormulaParser()
+        sem = wfParse.DimacsSemantics(self)
+        parser.parse("a * b + #(15)", semantics = sem)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
 
