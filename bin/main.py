@@ -286,29 +286,6 @@ class Application(object):
             else:
                 self._clauses.append([-a])
 
-    def read_weighted_formula(self, formula):
-        grammar = '''
-                    start = expression $ ;
-                    expression =
-                        | term '+' expression
-                        | term
-                        ;
-                    term =
-                        | factor '*' term
-                        | factor
-                        ;
-                    factor =
-                        | '(' expression ')'
-                        | number
-                        | var
-                        ;
-
-                    var =  ['not'] /[a-z][^\(+*,\)]*/ [/\(.*\)/] ;
-                    number = /#\([^\(+*,\)]*\)/ ;
-                '''
-        ast = tatsu.parse(grammar, formula)
-        
-
 
     def write_dimacs(self, stream):
         stream.write(f"p pcnf {self._max} {len(self._clauses)} {self._projected_cutoff}\n".encode())
