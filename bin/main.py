@@ -184,7 +184,7 @@ class Application(object):
                 if connective == 1:
                     self._clauses.append([p, -c1])
                     self._clauses.append([p, -c2])
-                    self._clauses.append([p, c1, c2])
+                    self._clauses.append([-p, c1, c2])
                 if connective == 2:
                     self._clauses.append([p, c1])
                     self._clauses.append([p, -c2])
@@ -285,6 +285,30 @@ class Application(object):
                 clause_writer(self._max, c1 = a, c2 = proven_below_atoms[self._td.root][a], connective = 2)
             else:
                 self._clauses.append([-a])
+
+    def read_weighted_formula(self, formula):
+        grammar = '''
+                    start = expression $ ;
+                    expression =
+                        | term '+' expression
+                        | term
+                        ;
+                    term =
+                        | factor '*' term
+                        | factor
+                        ;
+                    factor =
+                        | '(' expression ')'
+                        | number
+                        | var
+                        ;
+
+                    var =  ['not'] /[a-z][^\(+*,\)]*/ [/\(.*\)/] ;
+                    number = /#\([^\(+*,\)]*\)/ ;
+                '''
+        ast = tatsu.parse(grammar, formula)
+        
+
 
     def write_dimacs(self, stream):
         stream.write(f"p pcnf {self._max} {len(self._clauses)} {self._projected_cutoff}\n".encode())
