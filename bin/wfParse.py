@@ -144,7 +144,7 @@ class WeightedFormulaSemantics(object):
         return self._app.var2idx(var)
 
     def new_var(self):
-        return self._app.new_var()
+        return self._app.new_var("")
 
     def clause_writer(self, p, c1 = 0, c2 = 0, connective = 0):
         return self._app.clause_writer(p, c1 = c1, c2 = c2, connective = connective)

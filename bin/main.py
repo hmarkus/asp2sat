@@ -82,8 +82,9 @@ class Application(object):
             return self.control.symbolic_atoms[sym].literal
         return 0
 
-    def new_var(self):
+    def new_var(self, name):
         self._max += 1
+        self._nameMap[self._max] = name
         return self._max
 
     def _generatePrimalGraph(self):
@@ -92,6 +93,7 @@ class Application(object):
         self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
         self._vertexToAtom = {} # inverse mapping of _atomToVertex 
         self._max = 0
+        self._nameMap = {}
         unary = []
         for o in self.control.ground_program.objects:
             if isinstance(o, ClingoRule):
@@ -100,15 +102,18 @@ class Application(object):
                 self._program.append(o)
                 if len(o.atoms) > 1:
                     for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                        self._atomToVertex[a] = self.new_var()
+                        self._atomToVertex[a] = self.new_var(str(a))
                         self._vertexToAtom[self._max] = a
                     self._graph.add_hyperedge(tuple(map(lambda x: self._atomToVertex[x], o.atoms)))
                 else:
                     unary.append(o)
         for o in unary:
             for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                self._atomToVertex[a] = self.new_var()
+                self._atomToVertex[a] = self.new_var(str(a))
                 self._vertexToAtom[self._max] = a
+        #for sym in self.control.symbolic_atoms:
+        #    print(self._atomToVertex[sym.literal], sym.symbol)
+        #    print(sym.literal, sym.symbol)
 
 
     def _decomposeGraph(self):
@@ -121,8 +126,8 @@ class Application(object):
         #    with FileWriter(kwargs["gr_file"]) as fw:
         #        fw.write_gr(*input)
         logger.info("Running htd")
-        with open('graph.txt', mode='wb') as file_out:
-            self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
+        #with open('graph.txt', mode='wb') as file_out:
+        #    self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
         self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
         p.stdin.close()
         tdr = reader.TdReader.from_stream(p.stdout)
@@ -136,9 +141,9 @@ class Application(object):
     # connective == 0 -> and, == 1 -> or, == 2 -> impl, == 3 -> iff, == 4 -> *, == 5 -> +
     def clause_writer(self, p, c1 = 0, c2 = 0, connective = 0):
         if c1 == 0:
-            c1 = self.new_var()
+            c1 = self.new_var(f"{p}'sc[0]")
         if c2 == 0:
-            c2 = self.new_var()
+            c2 = self.new_var(f"{p}'sc[1]")
         if connective == 0:
             self._clauses.append([-p, c1])
             self._clauses.append([-p, c2])
@@ -152,7 +157,7 @@ class Application(object):
             self._clauses.append([p, -c2])
             self._clauses.append([-p, -c1, c2])
         if connective == 3:
-            c = self.clause_writer(p)
+            c = self.clause_writer(p, c1 = self.new_var(f"{c1}->{c2}"), c2 = self.new_var(f"{c2}->{c1}"))
             self.clause_writer(c[0], c1 = c1, c2 = c2, connective = 2)
             self.clause_writer(c[1], c1 = c2, c2 = c1, connective = 2)
         if connective == 4:
@@ -174,12 +179,14 @@ class Application(object):
         # remember all the disjuncts here
         include = []
         for i in range(count):
-            include.append(self.new_var())
-            c = self.clause_writer(self._max, c1 = l_bits[xp][i])                               # new_var <-> b_x'^i && c[1]
-            c = self.clause_writer(c[1], c1 = -l_bits[x][i])                                    # c[1] <-> -b_x^i && c[1]
+            include.append(self.new_var(f"disj_{i}"))
+            c = self.clause_writer(include[-1], c1 = l_bits[xp][i], c2 = self.new_var(f"{x}<_{node}{xp}V{i}w2"))                               # new_var <-> b_x'^i && c[1]
+            c = self.clause_writer(c[1], c1 = -l_bits[x][i], c2 = self.new_var(f"{x}<_{node}{xp}V{i}w3"))                                    # c[1] <-> -b_x^i && c[1]
             for j in range(i + 1, count):
-                c = self.clause_writer(c[1])                                                    # c[1] <-> c[0] && c[1]    
+                c = self.clause_writer(c[1], c1 = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}0"), c2 = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}1"))                                                    # c[1] <-> c[0] && c[1]    
                 self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
+            self._clauses.append([c[1]])
+
         # make sure that the disjunction is not trivially satisfied
         self._clauses.append([-myId] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
         for v in include:
@@ -212,27 +219,30 @@ class Application(object):
             # compute t.atoms
             t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
             # generate the variables for the bits for each atom of the node
-            count = math.ceil(math.log(len(t.atoms)))
+            count = math.ceil(math.log(max(len(t.atoms), 1)))
             self.bits[t] = (count, {})
             for a in t.atoms:
-                self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
-                self._max += count
+                self.bits[t][1][a] = []
+                #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
+                #self._max += count
+                for i in range(count):
+                    self.bits[t][1][a].append(self.new_var(f"b_{a}_{t}^{i}"))
             # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
             for tp in t.children:
                 prove_atoms[t].update(prove_atoms[tp].intersection(t.atoms))
                 for a in prove_atoms[tp].intersection(t.atoms):
                     if a not in proven_below_atoms[t]:
-                        proven_below_atoms[t][a] = self.new_var();
+                        proven_below_atoms[t][a] = self.new_var(f"p_<{t}^{a}");
             # take the rules we need and remove them
             rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
-            # program = [r for r in program if not r.atoms.issubset(t.atoms)]
+            program = [r for r in program if not r.atoms.issubset(t.atoms)]
             for r in rules[t]:
                 prove_atoms[t].update(r.head)
                 for a in r.head:
                     if a not in proven_at_atoms[t]:
-                        proven_at_atoms[t][a] = self.new_var()
+                        proven_at_atoms[t][a] = self.new_var(f"p_{t}^{a}")
                     if a not in proven_below_atoms[t]:
-                        proven_below_atoms[t][a] = self.new_var();
+                        proven_below_atoms[t][a] = self.new_var(f"p_<{t}^{a}");
 
         #take care of the remaining unary rules
         for r in program:
@@ -250,13 +260,14 @@ class Application(object):
 
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
-                relevant = prove_atoms[tp].intersection(t.atoms)
+                relevant = tp.atoms.intersection(t.atoms)
                 # FIXME: can we leave out everything below the diagonal?
                 for x, xp in product(relevant, relevant):
                     if x == xp:
                         continue
-                    self._clauses.append([self.new_var()])              # new_var
-                    c = self.clause_writer(self._max, connective = 3)   # new_var <-> c[0] <-> c[1]
+                    var = self.new_var(f"{x}<_{t}{xp}iff{x}<_{tp}{xp}")
+                    self._clauses.append([var])              # new_var
+                    c = self.clause_writer(var, c1 = self.new_var(f"{x}<_{t}{xp}"), c2 = self.new_var(f"{x}<_{tp}{xp}"), connective = 3)   # new_var <-> c[0] <-> c[1]
                     self.generateLessThan(x, xp, t, c[0])               # c[0] <-> x <_t x'
                     self.generateLessThan(x, xp, tp, c[1])              # c[1] <-> x <_t' x'
             
@@ -265,16 +276,18 @@ class Application(object):
                 relevant = tp.atoms.difference(t.atoms)
                 for a in relevant:
                     if a in proven_below_atoms[tp]:
-                        self._clauses.append([self.new_var()])                                                                      # new_var
-                        self.clause_writer(self._max, c1 = self._atomToVertex[a], c2 = proven_below_atoms[tp][a], connective = 2)   # new_var <-> x -> p_{<t'}^x
+                        var = self.new_var("true")
+                        self._clauses.append([var])                                                                      # new_var
+                        self.clause_writer(var, c1 = self._atomToVertex[a], c2 = proven_below_atoms[tp][a], connective = 2)   # new_var <-> x -> p_{<t'}^x
                     else:
                         # if we do not have a possibility to prove that a is stable, we can assert it to be false
                         self._clauses.append([-self._atomToVertex[a]])
             
             # generate (5), i.e. the propogation of things that were proven
             for a in prove_atoms[t]:
-                self._clauses.append([self.new_var()])                                              # new_var
-                c = self.clause_writer(self._max, c1 = proven_below_atoms[t][a], connective = 3)    # new_var <-> p_{<t}^x <-> c[1]
+                var = self.new_var("true")
+                self._clauses.append([var])                                              # new_var
+                c = self.clause_writer(var, c1 = proven_below_atoms[t][a], c2 = self.new_var(f"prooffor{a}below{t}"), connective = 3)    # new_var <-> p_{<t}^x <-> c[1]
                 include = []
                 if a in proven_at_atoms[t]:
                     include.append(proven_at_atoms[t][a])
@@ -287,18 +300,19 @@ class Application(object):
 
             # generate (6), i.e. the check for whether an atom was proven at the current node
             for x in proven_at_atoms[t]:
-                self._clauses.append([self.new_var()])                                              # new_var
-                c = self.clause_writer(self._max, c1 = proven_at_atoms[t][x], connective = 3)       # new_var <-> p_t^x <-> c[1]
+                var = self.new_var("true")
+                self._clauses.append([var])                                              # new_var
+                c = self.clause_writer(var, c1 = proven_at_atoms[t][x], c2 = self.new_var(f"prooffor{x}at{t}"), connective = 3)       # new_var <-> p_t^x <-> c[1]
                 include = []
                 for r in rules[t]:
                     if x in r.head:
-                        include.append(self.new_var())                                              # new_var_i
-                        cur = self._max
+                        cur = self.new_var(f"{x} proven by {r} at {t}")
+                        include.append(cur)                                              # new_var_i
                         for a in r.body:
                             if a > 0:
                                 cp = self.clause_writer(cur, c1 = self._atomToVertex[a])            # cur <-> a && c'[1]
                                 # FIXME: can this not be moved outside? 
-                                cp = self.clause_writer(cp[1], c1 = x)                              # c'[1] <-> x && c'[1]
+                                # cp = self.clause_writer(cp[1], c1 = self._atomToVertex[x])                              # c'[1] <-> x && c'[1]
                                 cp = self.clause_writer(cp[1])                                      # c'[1] <-> c'[0] && c'[1] 
                                 self.generateLessThan(a, x, t, cp[0])                               # c'[0] <-> a <_t x
                                 cur = cp[1]
@@ -309,6 +323,8 @@ class Application(object):
                             if a != x:
                                 cp = self.clause_writer(cur, c1 = -self._atomToVertex[a])           # cur <-> - b && c'[1]
                                 cur = cp[1]
+                        # TODO: cheeck in detail if this is correct
+                        self._clauses.append([cur])
                 self._clauses.append([-c[1]] + include)                                             # c[1] <-> new_var_1 || ... || new_var_n
                 for v in include:
                     self._clauses.append([c[1], -v])
@@ -316,17 +332,27 @@ class Application(object):
         # generate (4), i.e. the constraints that ensure that true atoms in the root are proven
         for a in self._td.root.atoms:
             if a in proven_below_atoms[self._td.root]:
-                self._clauses.append([self.new_var()])
-                self.clause_writer(self._max, c1 = self._atomToVertex[a], c2 = proven_below_atoms[self._td.root][a], connective = 2)
+                var = self.new_var("true")
+                self._clauses.append([var])
+                self.clause_writer(var, c1 = self._atomToVertex[a], c2 = proven_below_atoms[self._td.root][a], connective = 2)
             else:
                 self._clauses.append([-self._atomToVertex[a]])
 
+
+    # function for debugging
+    def model_to_names(self):
+        f = open("model.out")
+        f.readline()
+        vs = [int(x) for x in f.readline().split()]
+        for v in vs:
+            print(("-" if v < 0 else "")+self._nameMap[abs(v)])
 
     def write_dimacs(self, stream):
         stream.write(f"p pcnf {self._max} {len(self._clauses)} {self._projected_cutoff}\n".encode())
         stream.write(("vp " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + " 0\n" ).encode())
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+            #print(" ".join([self._nameMap[v] if v > 0 else f"-{self._nameMap[abs(v)]}" for v in c]))
         for (a, w) in self._weights.items():
             stream.write(f"w {a} {w}\n".encode())
         
@@ -368,6 +394,7 @@ class Application(object):
         parser.parse(wf, semantics = sem)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
+        #self.model_to_names()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
