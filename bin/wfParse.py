@@ -25,7 +25,7 @@ from tatsu.util import re, generic_main  # noqa
 KEYWORDS = {}  # type: ignore
 
 
-class UnknownBuffer(Buffer):
+class WeightedFormulaBuffer(Buffer):
     def __init__(
         self,
         text,
@@ -61,7 +61,7 @@ class WeightedFormulaParser(Parser):
         parseinfo=True,
         keywords=None,
         namechars='',
-        tokenizercls=UnknownBuffer,
+        tokenizercls=WeightedFormulaBuffer,
         **kwargs
     ):
         if keywords is None:
@@ -81,31 +81,34 @@ class WeightedFormulaParser(Parser):
         )
 
     @tatsumasu()
+    @nomemo
     def _start_(self):  # noqa
         self._expression_()
         self._check_eof()
 
     @tatsumasu()
+    @leftrec
     def _expression_(self):  # noqa
         with self._choice():
             with self._option():
-                self._term_()
-                self._token('+')
                 self._expression_()
+                self._token('+')
+                self._term_()
             with self._option():
                 self._term_()
-            self._error('expecting one of: factor term')
+            self._error('expecting one of: expression factor term')
 
     @tatsumasu()
+    @leftrec
     def _term_(self):  # noqa
         with self._choice():
             with self._option():
-                self._factor_()
-                self._token('*')
                 self._term_()
+                self._token('*')
+                self._factor_()
             with self._option():
                 self._factor_()
-            self._error('expecting one of: ( factor number var')
+            self._error('expecting one of: ( factor number term var')
 
     @tatsumasu()
     def _factor_(self):  # noqa
@@ -118,22 +121,22 @@ class WeightedFormulaParser(Parser):
                 self._number_()
             with self._option():
                 self._var_()
-            self._error('expecting one of: ( /#\\([^\\(+*,\\)]*\\)/ /[a-z][^\\(+*,\\)]*/ not number var')
+            self._error('expecting one of: ( /#\\([^\\(+*,\\)]*\\)/ /[a-z][^\\(+*,\\)]*/ not  number var')
 
     @tatsumasu()
     def _var_(self):  # noqa
         with self._optional():
-            self._token('not')
+            self._token('not ')
         self._pattern('[a-z][^\\(+*,\\)]*')
         with self._optional():
-            self._pattern('\\(.*\\)')
+            self._pattern('\\([^\\(+*\\)]*\\)')
 
     @tatsumasu()
     def _number_(self):  # noqa
         self._pattern('#\\([^\\(+*,\\)]*\\)')
 
 
-class DimacsSemantics(object):
+class WeightedFormulaSemantics(object):
     def __init__(self, app):
         self._app = app
 
@@ -166,14 +169,21 @@ class DimacsSemantics(object):
 
     def factor(self, ast):  # noqa
         if type(ast) == tuple and ast[0] == "(":
-            return ast[1]
+            ast = ast[1]
         return ast
 
     def var(self, ast):  # noqa
+        if type(ast) == tuple:
+            act = ""
+            for i in range(len(ast)):
+                act += ast[i]
+            ast = act
         if len(ast) > 3 and ast[:3] == "not":
             idx = -self.var2idx(ast[:3])
         else:
             idx = self.var2idx(ast)
+        if idx == 0:
+            return self.number("#(1)")
         n_var = self.new_var()
         self._app._clauses.append([-n_var, idx])
         return n_var
@@ -182,4 +192,3 @@ class DimacsSemantics(object):
         n_var = self.new_var()
         self._app._weights[n_var] = ast[2:-1]
         return n_var
-

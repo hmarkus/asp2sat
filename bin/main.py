@@ -92,13 +92,24 @@ class Application(object):
         self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
         self._vertexToAtom = {} # inverse mapping of _atomToVertex 
         self._max = 0
+        unary = []
         for o in self.control.ground_program.objects:
             if isinstance(o, ClingoRule):
                 o.atoms = set(o.head)
                 o.atoms.update(tuple(map(abs, o.body)))
-                self._max = max(self._max, max(o.atoms))
                 self._program.append(o)
-                self._graph.add_hyperedge(tuple(o.atoms))
+                if len(o.atoms) > 1:
+                    for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
+                        self._atomToVertex[a] = self.new_var()
+                        self._vertexToAtom[self._max] = a
+                    self._graph.add_hyperedge(tuple(map(lambda x: self._atomToVertex[x], o.atoms)))
+                else:
+                    unary.append(o)
+        for o in unary:
+            for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
+                self._atomToVertex[a] = self.new_var()
+                self._vertexToAtom[self._max] = a
+
 
     def _decomposeGraph(self):
         # Run htd
@@ -110,9 +121,9 @@ class Application(object):
         #    with FileWriter(kwargs["gr_file"]) as fw:
         #        fw.write_gr(*input)
         logger.info("Running htd")
+        with open('graph.txt', mode='wb') as file_out:
+            self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
         self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
-        #with open('graph.txt', mode='wb') as file_out:
-        #    self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
         p.stdin.close()
         tdr = reader.TdReader.from_stream(p.stdout)
         p.wait()
@@ -156,6 +167,25 @@ class Application(object):
             self._clauses.append([-p, -c1, -c2])
         return (c1, c2)
 
+    # a subroutine to generate x < x'
+    def generateLessThan(self, x, xp, node, myId):
+        count = self.bits[node][0]
+        l_bits = self.bits[node][1]
+        # remember all the disjuncts here
+        include = []
+        for i in range(count):
+            include.append(self.new_var())
+            c = self.clause_writer(self._max, c1 = l_bits[xp][i])                               # new_var <-> b_x'^i && c[1]
+            c = self.clause_writer(c[1], c1 = -l_bits[x][i])                                    # c[1] <-> -b_x^i && c[1]
+            for j in range(i + 1, count):
+                c = self.clause_writer(c[1])                                                    # c[1] <-> c[0] && c[1]    
+                self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
+        # make sure that the disjunction is not trivially satisfied
+        self._clauses.append([-myId] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
+        for v in include:
+            self._clauses.append([myId, -v])
+                         
+
     def _tdguidedReduction(self):
         # which variables NOT to project away
         self._projected_cutoff = self._max
@@ -167,7 +197,7 @@ class Application(object):
         proven_at_atoms = {}
         proven_below_atoms = {}
         # remember which atoms we used for the bits 
-        bits = {}
+        self.bits = {}
         # maps a node t to a set of rules that need to be considered in t
         # it actually suffices if every rule is considered only once in the entire td..
         rules = {}
@@ -180,12 +210,12 @@ class Application(object):
             proven_below_atoms[t] = {}
             proven_at_atoms[t] = {}
             # compute t.atoms
-            t.atoms = set(t.vertices)
+            t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
             # generate the variables for the bits for each atom of the node
             count = math.ceil(math.log(len(t.atoms)))
-            bits[t] = (count, {})
+            self.bits[t] = (count, {})
             for a in t.atoms:
-                bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
+                self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
                 self._max += count
             # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
             for tp in t.children:
@@ -193,46 +223,31 @@ class Application(object):
                 for a in prove_atoms[tp].intersection(t.atoms):
                     if a not in proven_below_atoms[t]:
                         proven_below_atoms[t][a] = self.new_var();
-            # FIXME: python does not have c++-like enumerator to modify list during iteration, right? 
-            # I think not. What about this though?
-            subprog = [r for r in program if r.atoms.issubset(t.atoms)]
-            program = [r for r in program if not r.atoms.issubset(t.atoms)]
-            for r in subprog:
+            # take the rules we need and remove them
+            rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
+            # program = [r for r in program if not r.atoms.issubset(t.atoms)]
+            for r in rules[t]:
                 prove_atoms[t].update(r.head)
                 for a in r.head:
-                    if a not in proven_at_atoms:
+                    if a not in proven_at_atoms[t]:
                         proven_at_atoms[t][a] = self.new_var()
                     if a not in proven_below_atoms[t]:
                         proven_below_atoms[t][a] = self.new_var();
-                rules[t].append(r)
+
+        #take care of the remaining unary rules
+        for r in program:
+            self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
+
         logger.info("program")
         logger.info(rules)
         logger.info("prove_atoms")
         logger.info(prove_atoms)
         # second td pass: use rules and prove_atoms to generate the reduction
         for t in self._td.nodes:
-            # generate the clauses for the rules in the current node
+            # generate (1) the clauses for the rules in the current node
             for r in rules[t]:
-                self._clauses.append(r.head + r.body)
+                self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
 
-            # a subroutine to generate x < x'
-            def generateLessThan(x, xp, node, myId):
-                count = bits[node][0]
-                l_bits = bits[node][1]
-                cur = myId
-                for i in range(count):
-                    c = self.clause_writer(cur, connective = 1)
-                    cur = c[1]
-                    c = self.clause_writer(c[0], c1 = l_bits[xp][i])
-                    c = self.clause_writer(c[1], c1 = -l_bits[x][i])
-                    curA = c[1]
-                    for j in range(i + 1, count):
-                        c = self.clause_writer(curA)
-                        curA = c[1]
-                        self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2)
-                # make sure that the disjunction is not trivially satisfied
-                self._clauses.append([-cur])
-                         
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
                 relevant = prove_atoms[tp].intersection(t.atoms)
@@ -240,61 +255,61 @@ class Application(object):
                 for x, xp in product(relevant, relevant):
                     if x == xp:
                         continue
-                    self._clauses.append([self.new_var()])
-                    c = self.clause_writer(self._max, connective = 3)
-                    generateLessThan(x, xp, t, c[0])
-                    generateLessThan(x, xp, tp, c[1])
+                    self._clauses.append([self.new_var()])              # new_var
+                    c = self.clause_writer(self._max, connective = 3)   # new_var <-> c[0] <-> c[1]
+                    self.generateLessThan(x, xp, t, c[0])               # c[0] <-> x <_t x'
+                    self.generateLessThan(x, xp, tp, c[1])              # c[1] <-> x <_t' x'
             
             # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
             for tp in t.children: 
                 relevant = tp.atoms.difference(t.atoms)
                 for a in relevant:
                     if a in proven_below_atoms[tp]:
-                        self._clauses.append([self.new_var()])
-                        self.clause_writer(self._max, c1 = a, c2 = proven_below_atoms[tp][a], connective = 2)
+                        self._clauses.append([self.new_var()])                                                                      # new_var
+                        self.clause_writer(self._max, c1 = self._atomToVertex[a], c2 = proven_below_atoms[tp][a], connective = 2)   # new_var <-> x -> p_{<t'}^x
                     else:
-                        # FIXME: if we do not have a possibility to prove that a is stable, we can assert it to be false
-                        self._clauses.append([-a])
+                        # if we do not have a possibility to prove that a is stable, we can assert it to be false
+                        self._clauses.append([-self._atomToVertex[a]])
             
             # generate (5), i.e. the propogation of things that were proven
             for a in prove_atoms[t]:
-                self._clauses.append([self.new_var()])
-                c = self.clause_writer(self._max, c1 = proven_below_atoms[t][a], connective = 3)
+                self._clauses.append([self.new_var()])                                              # new_var
+                c = self.clause_writer(self._max, c1 = proven_below_atoms[t][a], connective = 3)    # new_var <-> p_{<t}^x <-> c[1]
                 include = []
                 if a in proven_at_atoms[t]:
                     include.append(proven_at_atoms[t][a])
                 for tp in t.children:
-                    if a in prove_atoms[tp]:
+                    if a in proven_below_atoms[tp]:
                         include.append(proven_below_atoms[tp][a])
-                self._clauses.append([-c[1]] + include)
+                self._clauses.append([-c[1]] + include)                                             # c[1] <-> p_t^x || p_t1^x || ... || p_tn^x
                 for v in include:
                     self._clauses.append([c[1], -v])
 
             # generate (6), i.e. the check for whether an atom was proven at the current node
             for x in proven_at_atoms[t]:
-                self._clauses.append([self.new_var()])
-                c = self.clause_writer(self._max, c1 = proven_at_atoms[t][x], connective = 3)
+                self._clauses.append([self.new_var()])                                              # new_var
+                c = self.clause_writer(self._max, c1 = proven_at_atoms[t][x], connective = 3)       # new_var <-> p_t^x <-> c[1]
                 include = []
                 for r in rules[t]:
                     if x in r.head:
-                        include.append(self.new_var())
+                        include.append(self.new_var())                                              # new_var_i
                         cur = self._max
                         for a in r.body:
                             if a > 0:
-                                cp = self.clause_writer(cur, c1 = a)
-                                # FIXME: can this not be moved outside?
-                                cp = self.clause_writer(cp[1], c1 = x)
-                                cp = self.clause_writer(cp[1])
-                                generateLessThan(a, x, t, cp[0])
+                                cp = self.clause_writer(cur, c1 = self._atomToVertex[a])            # cur <-> a && c'[1]
+                                # FIXME: can this not be moved outside? 
+                                cp = self.clause_writer(cp[1], c1 = x)                              # c'[1] <-> x && c'[1]
+                                cp = self.clause_writer(cp[1])                                      # c'[1] <-> c'[0] && c'[1] 
+                                self.generateLessThan(a, x, t, cp[0])                               # c'[0] <-> a <_t x
                                 cur = cp[1]
-                            if a < 0:
-                                cp = self.clause_writer(cur, c1 = a)
+                            if a < 0 and a != -x:
+                                cp = self.clause_writer(cur, c1 = -self._atomToVertex[-a])          # cur <-> -b && c'[1]
                                 cur = cp[1]
                         for a in r.head:
                             if a != x:
-                                cp = self.clause_writer(cur, c1 = -a)
+                                cp = self.clause_writer(cur, c1 = -self._atomToVertex[a])           # cur <-> - b && c'[1]
                                 cur = cp[1]
-                self._clauses.append([-c[1]] + include)
+                self._clauses.append([-c[1]] + include)                                             # c[1] <-> new_var_1 || ... || new_var_n
                 for v in include:
                     self._clauses.append([c[1], -v])
             
@@ -302,9 +317,9 @@ class Application(object):
         for a in self._td.root.atoms:
             if a in proven_below_atoms[self._td.root]:
                 self._clauses.append([self.new_var()])
-                self.clause_writer(self._max, c1 = a, c2 = proven_below_atoms[self._td.root][a], connective = 2)
+                self.clause_writer(self._max, c1 = self._atomToVertex[a], c2 = proven_below_atoms[self._td.root][a], connective = 2)
             else:
-                self._clauses.append([-a])
+                self._clauses.append([-self._atomToVertex[a]])
 
 
     def write_dimacs(self, stream):
@@ -347,8 +362,10 @@ class Application(object):
         self._decomposeGraph()
         self._tdguidedReduction()
         parser = wfParse.WeightedFormulaParser()
-        sem = wfParse.DimacsSemantics(self)
-        parser.parse("a * b + #(15)", semantics = sem)
+        sem = wfParse.WeightedFormulaSemantics(self)
+        #wf = "#(1)*(pToS(1)*#(0.3) + not pToS(1)*#(0.7))*(pToS(2)*#(0.3) + not pToS(2)*#(0.7))*(pToS(3)*#(0.3) + not pToS(3)*#(0.7))*(pToS(4)*#(0.3) + not pToS(4)*#(0.7))*(pToS(5)*#(0.3) + not pToS(5)*#(0.7))*(fToI(1,5)*#(0.6806653626465567) + not fToI(1,5)*#(0.31933463735344325))*(fToI(2,3)*#(0.5450634851914681) + not fToI(2,3)*#(0.4549365148085319))*(fToI(3,1)*#(0.8421801125461652) + not fToI(3,1)*#(0.1578198874538348))*(fToI(3,4)*#(0.9086026088457357) + not fToI(3,4)*#(0.09139739115426426))*(fToI(3,5)*#(0.9800625752507806) + not fToI(3,5)*#(0.019937424749219446))*(fToI(4,2)*#(0.9315204487060583) + not fToI(4,2)*#(0.06847955129394168))"
+        wf = "#(1)"
+        parser.parse(wf, semantics = sem)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
 
