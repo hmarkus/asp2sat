@@ -180,10 +180,14 @@ class WeightedFormulaSemantics(object):
             ast = act
         if len(ast) > 3 and ast[:3] == "not":
             idx = -self.var2idx(ast[:3])
+            # if the variable was optimized away, we know it is false
+            if idx == 0:
+                return self.number("#(1)")
         else:
             idx = self.var2idx(ast)
-        if idx == 0:
-            return self.number("#(1)")
+            # if the variable was optimized away, we know it is false
+            if idx == 0:
+                return self.number("#(0)")
         n_var = self.new_var()
         self._app._clauses.append([-n_var, idx])
         return n_var
