@@ -36,13 +36,15 @@ if src_path not in sys.path:
 logger = logging.getLogger("asp2sat")
 logging.basicConfig(format='[%(levelname)s] %(name)s: %(message)s', level="INFO")
 
-from htd_validate.utils import hypergraph
+from htd_validate.utils import hypergraph, graph
 
 import clingoext
 from clingoext import ClingoRule
 #from htd_validate.decompositions import *
 from dpdb import reader
 from dpdb import treedecomp
+from dpdb.problems.sat_util import *
+from dpdb.writer import StreamWriter
 
 import wfParse
 
@@ -79,7 +81,8 @@ class Application(object):
     def var2idx(self, var):
         sym = clingo.parse_term(var)
         if sym in self.control.symbolic_atoms:
-            return self.control.symbolic_atoms[sym].literal
+            lit = self.control.symbolic_atoms[sym].literal
+            return self._atomToVertex[lit]
         return 0
 
     def new_var(self, name):
@@ -134,6 +137,7 @@ class Application(object):
         p.wait()
         logger.info("TD computed")
         self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
         logger.info(self._td.nodes)
 
 
@@ -356,6 +360,17 @@ class Application(object):
         for (a, w) in self._weights.items():
             stream.write(f"w {a} {w}\n".encode())
         
+    def encoding_stats(self):
+        num_vars, edges= cnf2primal(self._max, self._clauses)
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        logger.debug("Running htd")
+        StreamWriter(p.stdin).write_gr(num_vars, edges)
+        p.stdin.close()
+        tdr = reader.TdReader.from_stream(p.stdout)
+        p.wait()
+        logger.debug("Parsing tree decomposition")
+        td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
                     
 
     def main(self, clingo_control, files):
@@ -389,12 +404,12 @@ class Application(object):
         self._tdguidedReduction()
         parser = wfParse.WeightedFormulaParser()
         sem = wfParse.WeightedFormulaSemantics(self)
-        #wf = "#(1)*(pToS(1)*#(0.3) + not pToS(1)*#(0.7))*(pToS(2)*#(0.3) + not pToS(2)*#(0.7))*(pToS(3)*#(0.3) + not pToS(3)*#(0.7))*(pToS(4)*#(0.3) + not pToS(4)*#(0.7))*(pToS(5)*#(0.3) + not pToS(5)*#(0.7))*(fToI(1,5)*#(0.6806653626465567) + not fToI(1,5)*#(0.31933463735344325))*(fToI(2,3)*#(0.5450634851914681) + not fToI(2,3)*#(0.4549365148085319))*(fToI(3,1)*#(0.8421801125461652) + not fToI(3,1)*#(0.1578198874538348))*(fToI(3,4)*#(0.9086026088457357) + not fToI(3,4)*#(0.09139739115426426))*(fToI(3,5)*#(0.9800625752507806) + not fToI(3,5)*#(0.019937424749219446))*(fToI(4,2)*#(0.9315204487060583) + not fToI(4,2)*#(0.06847955129394168))"
-        wf = "#(1)"
+        wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
         parser.parse(wf, semantics = sem)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
         #self.model_to_names()
+        self.encoding_stats()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
