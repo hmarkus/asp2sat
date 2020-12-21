@@ -98,7 +98,7 @@ class Application(object):
     def remove_tautologies(self):
         tmp = []
         for o in self.control.ground_program.objects:
-            if isinstance(0, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
+            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
                 tmp.append(o)
         self.control.ground_program.objects = tmp
         
