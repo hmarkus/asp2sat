@@ -95,7 +95,16 @@ class Application(object):
         self._nameMap[self._max] = name
         return self._max
 
+    def remove_tautologies(self):
+        tmp = []
+        for o in self.control.ground_program.objects:
+            if isinstance(0, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
+                tmp.append(o)
+        self.control.ground_program.objects = tmp
+        
+
     def _generatePrimalGraph(self):
+        self.remove_tautologies()
         self._graph = hypergraph.Hypergraph()
         self._program = []
         self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
@@ -255,7 +264,7 @@ class Application(object):
                             if a > 0:
                                 includeAnd.append(self._atomToVertex[a])
                                 includeAnd.append(self._lessThan[(a,x)])
-                            if a < 0 and a != -x:
+                            if a < 0:
                                 includeAnd.append(-self._atomToVertex[-a])
                         for a in r.head:
                             if a != x:
@@ -331,10 +340,10 @@ class Application(object):
 
         self._decomposeGraph()
         self._tdguidedReduction()
-        parser = wfParse.WeightedFormulaParser()
-        sem = wfParse.WeightedFormulaSemantics(self)
-        wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
-        parser.parse(wf, semantics = sem)
+        #parser = wfParse.WeightedFormulaParser()
+        #sem = wfParse.WeightedFormulaSemantics(self)
+        #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
+        #parser.parse(wf, semantics = sem)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
         #self.model_to_names()
