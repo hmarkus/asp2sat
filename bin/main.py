@@ -71,6 +71,8 @@ class Application(object):
         self._weights = {}
         # store the clauses here
         self._clauses = []
+        # remember one variable for x <_t x' regardless of t
+        self._lessThan = {}
 
     def _read(self, path):
         if path == "-":
@@ -180,7 +182,7 @@ class Application(object):
         return (c1, c2)
 
     # a subroutine to generate x < x'
-    def generateLessThan(self, x, xp, node, myId):
+    def generateLessThan(self, x, xp, node):
         count = self.bits[node][0]
         l_bits = self.bits[node][1]
         # remember all the disjuncts here
@@ -194,10 +196,12 @@ class Application(object):
                 self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
             self._clauses.append([c[1]])
 
-        # make sure that the disjunction is not trivially satisfied
-        self._clauses.append([-myId] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
+        if not (x,xp) in self._lessThan:
+            self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
+        self._clauses.append([-self._lessThan[(x,xp)]] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
         for v in include:
-            self._clauses.append([myId, -v])
+            self._clauses.append([self._lessThan[(x,xp)], -v])
+        return self._lessThan[(x,xp)]
                          
 
     def _tdguidedReduction(self):
@@ -264,16 +268,17 @@ class Application(object):
 
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
-                relevant = tp.atoms.intersection(t.atoms)
+                relevant = list(tp.atoms.intersection(t.atoms))
                 # FIXME: can we leave out everything below the diagonal?
-                for x, xp in product(relevant, relevant):
-                    if x == xp:
-                        continue
-                    var = self.new_var(f"{x}<_{t}{xp}iff{x}<_{tp}{xp}")
-                    self._clauses.append([var])              # new_var
-                    c = self.clause_writer(var, c1 = self.new_var(f"{x}<_{t}{xp}"), c2 = self.new_var(f"{x}<_{tp}{xp}"), connective = 3)   # new_var <-> c[0] <-> c[1]
-                    self.generateLessThan(x, xp, t, c[0])               # c[0] <-> x <_t x'
-                    self.generateLessThan(x, xp, tp, c[1])              # c[1] <-> x <_t' x'
+                for i in range(len(relevant)):
+                    for j in range(i + 1, len(relevant)):
+                        self.generateLessThan(relevant[i], relevant[j], t)
+                        self.generateLessThan(relevant[i], relevant[j], tp)
+                #for x, xp in product(relevant, relevant):
+                #    if x == xp:
+                #        continue
+                #    self.generateLessThan(x, xp, t)
+                #    self.generateLessThan(x, xp, tp)
             
             # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
             for tp in t.children: 
@@ -293,8 +298,7 @@ class Application(object):
                                 cp = self.clause_writer(cur, c1 = self._atomToVertex[a])            # cur <-> a && c'[1]
                                 # FIXME: can this not be moved outside? 
                                 # cp = self.clause_writer(cp[1], c1 = self._atomToVertex[x])                              # c'[1] <-> x && c'[1]
-                                cp = self.clause_writer(cp[1])                                      # c'[1] <-> c'[0] && c'[1] 
-                                self.generateLessThan(a, x, t, cp[0])                               # c'[0] <-> a <_t x
+                                cp = self.clause_writer(cp[1], c1 = self.generateLessThan(a, x, t)) # c'[1] <-> a <_t x && c'[1]
                                 cur = cp[1]
                             if a < 0 and a != -x:
                                 cp = self.clause_writer(cur, c1 = -self._atomToVertex[-a])          # cur <-> -b && c'[1]
