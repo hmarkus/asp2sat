@@ -250,7 +250,8 @@ class Application(object):
 
         #take care of the remaining unary rules
         for r in program:
-            self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
+            if not r.choice: # FIXME: is this really all we need to do to make sure that choice rules are handled correctly?
+                self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
 
         logger.info("program")
         logger.info(rules)
@@ -260,7 +261,8 @@ class Application(object):
         for t in self._td.nodes:
             # generate (1) the clauses for the rules in the current node
             for r in rules[t]:
-                self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
+                if not r.choice: # FIXME: is this really all we need to do to make sure that choice rules are handled correctly?
+                    self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
 
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
@@ -352,13 +354,13 @@ class Application(object):
             print(("-" if v < 0 else "")+self._nameMap[abs(v)])
 
     def write_dimacs(self, stream):
-        stream.write(f"p pcnf {self._max} {len(self._clauses)} {self._projected_cutoff}\n".encode())
-        stream.write(("vp " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + " 0\n" ).encode())
+        stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
+        stream.write(("pv " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + " 0\n" ).encode())
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
             #print(" ".join([self._nameMap[v] if v > 0 else f"-{self._nameMap[abs(v)]}" for v in c]))
-        for (a, w) in self._weights.items():
-            stream.write(f"w {a} {w}\n".encode())
+        #for (a, w) in self._weights.items():
+        #    stream.write(f"w {a} {w}\n".encode())
         
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
