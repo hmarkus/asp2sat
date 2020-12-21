@@ -189,12 +189,14 @@ class Application(object):
         include = []
         for i in range(count):
             include.append(self.new_var(f"disj_{i}"))
-            c = self.clause_writer(include[-1], c1 = l_bits[xp][i], c2 = self.new_var(f"{x}<_{node}{xp}V{i}w2"))                               # new_var <-> b_x'^i && c[1]
-            c = self.clause_writer(c[1], c1 = -l_bits[x][i], c2 = self.new_var(f"{x}<_{node}{xp}V{i}w3"))                                    # c[1] <-> -b_x^i && c[1]
+            includeAnd = [l_bits[xp][i], -l_bits[x][i]]
             for j in range(i + 1, count):
-                c = self.clause_writer(c[1], c1 = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}0"), c2 = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}1"))                                                    # c[1] <-> c[0] && c[1]    
-                self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
-            self._clauses.append([c[1]])
+                impVar = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}0")
+                includeAnd.append(impVar)
+                self.clause_writer(impVar, c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
+            self._clauses.append([include[-1]] + [-x for x in includeAnd])
+            for v in includeAnd:
+                self._clauses.append([-include[-1], v])
 
         if not (x,xp) in self._lessThan:
             self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
@@ -209,7 +211,6 @@ class Application(object):
         self._projected_cutoff = self._max
         # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
         # this is the case if there is a rule suitable for proving a in or below t
-        prove_atoms = {}
         proven_at_atoms = {}
         proven_below_atoms = {}
         # remember which atoms we used for the bits 
@@ -221,7 +222,6 @@ class Application(object):
         program = list(self._program)
         # first td pass: determine rules and prove_atoms
         for t in self._td.nodes:
-            prove_atoms[t] = set()
             rules[t] = []
             proven_at_atoms[t] = {}
             # compute t.atoms
@@ -235,14 +235,10 @@ class Application(object):
                 #self._max += count
                 for i in range(count):
                     self.bits[t][1][a].append(self.new_var(f"b_{a}_{t}^{i}"))
-            # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
-            for tp in t.children:
-                prove_atoms[t].update(prove_atoms[tp].intersection(t.atoms))
             # take the rules we need and remove them
             rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
             program = [r for r in program if not r.atoms.issubset(t.atoms)]
             for r in rules[t]:
-                prove_atoms[t].update(r.head)
                 for a in r.head:
                     if a not in proven_at_atoms[t]:
                         proven_at_atoms[t][a] = self.new_var(f"p_{t}^{a}")
@@ -257,8 +253,6 @@ class Application(object):
 
         logger.info("program")
         logger.info(rules)
-        logger.info("prove_atoms")
-        logger.info(prove_atoms)
         # second td pass: use rules and prove_atoms to generate the reduction
         for t in self._td.nodes:
             # generate (1) the clauses for the rules in the current node
@@ -268,17 +262,12 @@ class Application(object):
 
             # generate (2), i.e. the constraints that maintain the inequalities between nodes
             for tp in t.children:
-                relevant = list(tp.atoms.intersection(t.atoms))
-                # FIXME: can we leave out everything below the diagonal?
-                for i in range(len(relevant)):
-                    for j in range(i + 1, len(relevant)):
-                        self.generateLessThan(relevant[i], relevant[j], t)
-                        self.generateLessThan(relevant[i], relevant[j], tp)
-                #for x, xp in product(relevant, relevant):
-                #    if x == xp:
-                #        continue
-                #    self.generateLessThan(x, xp, t)
-                #    self.generateLessThan(x, xp, tp)
+                relevant = tp.atoms.intersection(t.atoms)
+                for x, xp in product(relevant, relevant):
+                    if x == xp:
+                        continue
+                    self.generateLessThan(x, xp, t)
+                    self.generateLessThan(x, xp, tp)
             
             # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
             for tp in t.children: 
@@ -291,24 +280,20 @@ class Application(object):
                 include = []
                 for r in rules[t]:
                     if x in r.head:
-                        cur = self.new_var(f"{x} proven by {r} at {t}")
-                        include.append(cur)                                              # new_var_i
+                        includeAnd = []
+                        include.append(self.new_var(f"{x} proven by {r} at {t}"))                                              # new_var_i
                         for a in r.body:
                             if a > 0:
-                                cp = self.clause_writer(cur, c1 = self._atomToVertex[a])            # cur <-> a && c'[1]
-                                # FIXME: can this not be moved outside? 
-                                # cp = self.clause_writer(cp[1], c1 = self._atomToVertex[x])                              # c'[1] <-> x && c'[1]
-                                cp = self.clause_writer(cp[1], c1 = self.generateLessThan(a, x, t)) # c'[1] <-> a <_t x && c'[1]
-                                cur = cp[1]
+                                includeAnd.append(self._atomToVertex[a])
+                                includeAnd.append(self.generateLessThan(a, x, t))
                             if a < 0 and a != -x:
-                                cp = self.clause_writer(cur, c1 = -self._atomToVertex[-a])          # cur <-> -b && c'[1]
-                                cur = cp[1]
+                                includeAnd.append(self._atomToVertex[-a])
                         for a in r.head:
                             if a != x:
-                                cp = self.clause_writer(cur, c1 = -self._atomToVertex[a])           # cur <-> - b && c'[1]
-                                cur = cp[1]
-                        # TODO: cheeck in detail if this is correct
-                        self._clauses.append([cur])
+                                includeAnd.append(-self._atomToVertex[a])
+                        self._clauses.append([include[-1]] + [-x for x in includeAnd])
+                        for v in includeAnd:
+                            self._clauses.append([-include[-1], v])
                 self._clauses.append([-proven_at_atoms[t][x]] + include)                                             # c[1] <-> new_var_1 || ... || new_var_n
                 for v in include:
                     self._clauses.append([proven_at_atoms[t][x], -v])
