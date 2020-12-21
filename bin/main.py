@@ -283,9 +283,6 @@ class Application(object):
             
             # generate (6), i.e. the check for whether an atom was proven at the current node
             for x in proven_at_atoms[t]:
-                var = self.new_var("true")
-                self._clauses.append([var])                                              # new_var
-                c = self.clause_writer(var, c1 = proven_at_atoms[t][x], c2 = self.new_var(f"prooffor{x}at{t}"), connective = 3)       # new_var <-> p_t^x <-> c[1]
                 include = []
                 for r in rules[t]:
                     if x in r.head:
@@ -308,9 +305,9 @@ class Application(object):
                                 cur = cp[1]
                         # TODO: cheeck in detail if this is correct
                         self._clauses.append([cur])
-                self._clauses.append([-c[1]] + include)                                             # c[1] <-> new_var_1 || ... || new_var_n
+                self._clauses.append([-proven_at_atoms[t][x]] + include)                                             # c[1] <-> new_var_1 || ... || new_var_n
                 for v in include:
-                    self._clauses.append([c[1], -v])
+                    self._clauses.append([proven_at_atoms[t][x], -v])
             
         # generate (4), i.e. the constraints that ensure that true atoms in the root are proven
         for a in self._td.root.atoms:
