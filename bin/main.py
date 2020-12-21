@@ -73,7 +73,6 @@ class Application(object):
         self._clauses = []
         # remember one variable for x <_t x' regardless of t
         self._lessThan = {}
-        self._done = {}
 
     def _read(self, path):
         if path == "-":
@@ -182,35 +181,6 @@ class Application(object):
             self._clauses.append([-p, -c1, -c2])
         return (c1, c2)
 
-    # a subroutine to generate x < x'
-    def generateLessThan(self, x, xp, node):
-        if not (x,xp) in self._lessThan:
-            self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
-            self._done[(x,xp)] = set()
-        if node in self._done[(x,xp)]:
-            return self._lessThan[(x,xp)]
-        self._done[(x,xp)].add(node)
-        count = self.bits[node][0]
-        l_bits = self.bits[node][1]
-        # remember all the disjuncts here
-        include = []
-        for i in range(count):
-            include.append(self.new_var(f"disj_{i}"))
-            includeAnd = [l_bits[xp][i], -l_bits[x][i]]
-            for j in range(i + 1, count):
-                impVar = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}0")
-                includeAnd.append(impVar)
-                self.clause_writer(impVar, c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
-            self._clauses.append([include[-1]] + [-x for x in includeAnd])
-            for v in includeAnd:
-                self._clauses.append([-include[-1], v])
-
-        self._clauses.append([-self._lessThan[(x,xp)]] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
-        for v in include:
-            self._clauses.append([self._lessThan[(x,xp)], -v])
-        return self._lessThan[(x,xp)]
-                         
-
     def _tdguidedReduction(self):
         # which variables NOT to project away
         self._projected_cutoff = self._max
@@ -218,8 +188,6 @@ class Application(object):
         # this is the case if there is a rule suitable for proving a in or below t
         proven_at_atoms = {}
         proven_below_atoms = {}
-        # remember which atoms we used for the bits 
-        self.bits = {}
         # maps a node t to a set of rules that need to be considered in t
         # it actually suffices if every rule is considered only once in the entire td..
         rules = {}
@@ -231,15 +199,20 @@ class Application(object):
             proven_at_atoms[t] = {}
             # compute t.atoms
             t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
-            # generate the variables for the bits for each atom of the node
-            count = math.ceil(math.log(max(len(t.atoms), 1)))
-            self.bits[t] = (count, {})
-            for a in t.atoms:
-                self.bits[t][1][a] = []
-                #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
-                #self._max += count
-                for i in range(count):
-                    self.bits[t][1][a].append(self.new_var(f"b_{a}_{t}^{i}"))
+            # generate the lessThan atoms
+            for tup in product(t.atoms, t.atoms):
+                if tup[0] != tup[1] and tup not in self._lessThan:
+                    self._lessThan[tup] = self.new_var(f"{tup[0]}<{tup[1]}")
+            # antisymmetry and connexity
+            for (x,y) in product(t.atoms, t.atoms):
+                if x != y:
+                    self._clauses.append([-self._lessThan[(x,y)], -self._lessThan[(y,x)]])
+                    self._clauses.append([self._lessThan[(x,y)], self._lessThan[(y,x)]])
+
+            # transitivity
+            for (x,y,z) in product(t.atoms, t.atoms, t.atoms):
+                if x != y and y != z and x != z:
+                    self._clauses.append([-self._lessThan[(x,y)], -self._lessThan[(y,z)], self._lessThan[(x,z)]])
             # take the rules we need and remove them
             rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
             program = [r for r in program if not r.atoms.issubset(t.atoms)]
@@ -265,15 +238,6 @@ class Application(object):
                 if not r.choice: # FIXME: is this really all we need to do to make sure that choice rules are handled correctly?
                     self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
 
-            # generate (2), i.e. the constraints that maintain the inequalities between nodes
-            for tp in t.children:
-                relevant = tp.atoms.intersection(t.atoms)
-                for x, xp in product(relevant, relevant):
-                    if x == xp:
-                        continue
-                    self.generateLessThan(x, xp, t)
-                    self.generateLessThan(x, xp, tp)
-            
             # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
             for tp in t.children: 
                 relevant = tp.atoms.difference(t.atoms)
@@ -290,7 +254,7 @@ class Application(object):
                         for a in r.body:
                             if a > 0:
                                 includeAnd.append(self._atomToVertex[a])
-                                includeAnd.append(self.generateLessThan(a, x, t))
+                                includeAnd.append(self._lessThan[(a,x)])
                             if a < 0 and a != -x:
                                 includeAnd.append(-self._atomToVertex[-a])
                         for a in r.head:
