@@ -287,7 +287,7 @@ class Application(object):
                                 includeAnd.append(self._atomToVertex[a])
                                 includeAnd.append(self.generateLessThan(a, x, t))
                             if a < 0 and a != -x:
-                                includeAnd.append(self._atomToVertex[-a])
+                                includeAnd.append(-self._atomToVertex[-a])
                         for a in r.head:
                             if a != x:
                                 includeAnd.append(-self._atomToVertex[a])
