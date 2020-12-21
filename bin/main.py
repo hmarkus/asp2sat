@@ -67,7 +67,10 @@ class Application(object):
         self.program_name = "clingoext"
         self.version = "0.0.1"
         self.config = AppConfig()
+        # store the weights of literals here
         self._weights = {}
+        # store the clauses here
+        self._clauses = []
 
     def _read(self, path):
         if path == "-":
@@ -200,8 +203,6 @@ class Application(object):
     def _tdguidedReduction(self):
         # which variables NOT to project away
         self._projected_cutoff = self._max
-        # store the clauses here
-        self._clauses = []
         # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
         # this is the case if there is a rule suitable for proving a in or below t
         prove_atoms = {}
@@ -218,7 +219,6 @@ class Application(object):
         for t in self._td.nodes:
             prove_atoms[t] = set()
             rules[t] = []
-            proven_below_atoms[t] = {}
             proven_at_atoms[t] = {}
             # compute t.atoms
             t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
@@ -234,9 +234,6 @@ class Application(object):
             # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
             for tp in t.children:
                 prove_atoms[t].update(prove_atoms[tp].intersection(t.atoms))
-                for a in prove_atoms[tp].intersection(t.atoms):
-                    if a not in proven_below_atoms[t]:
-                        proven_below_atoms[t][a] = self.new_var(f"p_<{t}^{a}");
             # take the rules we need and remove them
             rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
             program = [r for r in program if not r.atoms.issubset(t.atoms)]
@@ -245,8 +242,9 @@ class Application(object):
                 for a in r.head:
                     if a not in proven_at_atoms[t]:
                         proven_at_atoms[t][a] = self.new_var(f"p_{t}^{a}")
-                    if a not in proven_below_atoms[t]:
-                        proven_below_atoms[t][a] = self.new_var(f"p_<{t}^{a}");
+                    if a not in proven_below_atoms:
+                        proven_below_atoms[a] = set()
+                    proven_below_atoms[a].add(proven_at_atoms[t][a])
 
         #take care of the remaining unary rules
         for r in program:
@@ -281,29 +279,8 @@ class Application(object):
             for tp in t.children: 
                 relevant = tp.atoms.difference(t.atoms)
                 for a in relevant:
-                    if a in proven_below_atoms[tp]:
-                        var = self.new_var("true")
-                        self._clauses.append([var])                                                                      # new_var
-                        self.clause_writer(var, c1 = self._atomToVertex[a], c2 = proven_below_atoms[tp][a], connective = 2)   # new_var <-> x -> p_{<t'}^x
-                    else:
-                        # if we do not have a possibility to prove that a is stable, we can assert it to be false
-                        self._clauses.append([-self._atomToVertex[a]])
+                    self._clauses.append([-self._atomToVertex[a]] + list(proven_below_atoms.get(a, [])))  # x -> p_{t_1}^x || ... || p_{t_n}^x
             
-            # generate (5), i.e. the propogation of things that were proven
-            for a in prove_atoms[t]:
-                var = self.new_var("true")
-                self._clauses.append([var])                                              # new_var
-                c = self.clause_writer(var, c1 = proven_below_atoms[t][a], c2 = self.new_var(f"prooffor{a}below{t}"), connective = 3)    # new_var <-> p_{<t}^x <-> c[1]
-                include = []
-                if a in proven_at_atoms[t]:
-                    include.append(proven_at_atoms[t][a])
-                for tp in t.children:
-                    if a in proven_below_atoms[tp]:
-                        include.append(proven_below_atoms[tp][a])
-                self._clauses.append([-c[1]] + include)                                             # c[1] <-> p_t^x || p_t1^x || ... || p_tn^x
-                for v in include:
-                    self._clauses.append([c[1], -v])
-
             # generate (6), i.e. the check for whether an atom was proven at the current node
             for x in proven_at_atoms[t]:
                 var = self.new_var("true")
@@ -337,12 +314,7 @@ class Application(object):
             
         # generate (4), i.e. the constraints that ensure that true atoms in the root are proven
         for a in self._td.root.atoms:
-            if a in proven_below_atoms[self._td.root]:
-                var = self.new_var("true")
-                self._clauses.append([var])
-                self.clause_writer(var, c1 = self._atomToVertex[a], c2 = proven_below_atoms[self._td.root][a], connective = 2)
-            else:
-                self._clauses.append([-self._atomToVertex[a]])
+            self._clauses.append([-self._atomToVertex[a]] + list(proven_below_atoms.get(a, [])))
 
 
     # function for debugging
