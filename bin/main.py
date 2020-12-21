@@ -73,6 +73,7 @@ class Application(object):
         self._clauses = []
         # remember one variable for x <_t x' regardless of t
         self._lessThan = {}
+        self._done = {}
 
     def _read(self, path):
         if path == "-":
@@ -183,6 +184,12 @@ class Application(object):
 
     # a subroutine to generate x < x'
     def generateLessThan(self, x, xp, node):
+        if not (x,xp) in self._lessThan:
+            self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
+            self._done[(x,xp)] = set()
+        if node in self._done[(x,xp)]:
+            return self._lessThan[(x,xp)]
+        self._done[(x,xp)].add(node)
         count = self.bits[node][0]
         l_bits = self.bits[node][1]
         # remember all the disjuncts here
@@ -198,8 +205,6 @@ class Application(object):
             for v in includeAnd:
                 self._clauses.append([-include[-1], v])
 
-        if not (x,xp) in self._lessThan:
-            self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
         self._clauses.append([-self._lessThan[(x,xp)]] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
         for v in include:
             self._clauses.append([self._lessThan[(x,xp)], -v])
