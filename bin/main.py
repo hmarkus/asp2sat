@@ -96,7 +96,15 @@ class Application(object):
         self._nameMap[self._max] = name
         return self._max
 
+    def remove_tautologies(self):
+        tmp = []
+        for o in self.control.ground_program.objects:
+            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
+                tmp.append(o)
+        self.control.ground_program.objects = tmp
+
     def _generatePrimalGraph(self):
+        self.remove_tautologies()
         self._graph = hypergraph.Hypergraph()
         self._program = []
         self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
