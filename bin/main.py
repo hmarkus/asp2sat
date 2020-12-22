@@ -223,7 +223,7 @@ class Application(object):
             # compute t.atoms
             t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
             # generate the variables for the bits for each atom of the node
-            count = math.ceil(math.log(max(len(t.atoms), 1)))
+            count = math.ceil(math.log(max(len(t.atoms), 2), 2))
             self.bits[t] = (count, {})
             for a in t.atoms:
                 self.bits[t][1][a] = []
