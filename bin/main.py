@@ -335,6 +335,16 @@ class Application(object):
         #for (a, w) in self._weights.items():
         #    stream.write(f"w {a} {w}\n".encode())
         
+    def my_write(self):
+        with open('out.cnf', mode='wb') as file_out:
+            file_out.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
+            for c in self._clauses:
+                file_out.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+        with open('white.var', mode='wb') as file_out:
+            file_out.write(("\n".join([str(v) for v in self._projected])).encode())
+        with open('pv.var', mode='wb') as file_out:
+            file_out.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
+
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -452,12 +462,13 @@ class Application(object):
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
         #parser.parse(wf, semantics = sem)
-        self.encoding_stats()
-        self.simp()
-        with open('out.cnf', mode='wb') as file_out:
-            self.write_dimacs(file_out)
+        #self.encoding_stats()
+        #self.simp()
+        self.my_write()
+        #with open('out.cnf', mode='wb') as file_out:
+        #    self.write_dimacs(file_out)
         #self.model_to_names()
-        self.encoding_stats()
+        #self.encoding_stats()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
