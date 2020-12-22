@@ -71,6 +71,8 @@ class Application(object):
         self._weights = {}
         # store the clauses here
         self._clauses = []
+        # store the projected variables
+        self._projected = {}
         # remember one variable for x <_t x' regardless of t
         self._lessThan = {}
         self._done = {}
@@ -128,6 +130,8 @@ class Application(object):
             for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
                 self._atomToVertex[a] = self.new_var(str(a))
                 self._vertexToAtom[self._max] = a
+
+        self._projected = set(range(1, self._max + 1))
         #for sym in self.control.symbolic_atoms:
         #    print(self._atomToVertex[sym.literal], sym.symbol)
         #    print(sym.literal, sym.symbol)
@@ -220,8 +224,6 @@ class Application(object):
                          
 
     def _tdguidedReduction(self):
-        # which variables NOT to project away
-        self._projected_cutoff = self._max
         # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
         # this is the case if there is a rule suitable for proving a in or below t
         proven_at_atoms = {}
@@ -326,7 +328,7 @@ class Application(object):
 
     def write_dimacs(self, stream):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
-        stream.write(("pv " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + " 0\n" ).encode())
+        stream.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
             #print(" ".join([self._nameMap[v] if v > 0 else f"-{self._nameMap[abs(v)]}" for v in c]))
@@ -344,6 +346,77 @@ class Application(object):
         logger.debug("Parsing tree decomposition")
         td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
+
+    def simp(self):
+        logger.info(f"Stats before simp(): #vars: {self._max} #clauses: {len(self._clauses)} #projected: {len(self._projected)}")
+        change = True
+        while change:
+            change = self.unit_prop()
+            change |= self.pure_lit_elim()
+
+        variables = set()
+        for c in self._clauses:
+            variables.update((abs(l) for l in c))
+        logger.info(f"Stats before simp(): #vars: {len(variables)} #clauses: {len(self._clauses)} #projected: {len(self._projected)}")
+
+    def unit_prop(self):
+        change = False
+        # simplify with single clauses, avoid copies, do it at most 10 times in a row
+        singles = set([c[0] for c in self._clauses if len(c) == 1])
+        self._clauses = [c for c in self._clauses if len(c) != 1]
+        iterate = 0
+        removed_singles = True
+        while iterate < 10 and removed_singles:
+            removed_singles = False
+            i = 0
+            while i < len(self._clauses):
+                j = 0
+                cl = self._clauses[i]
+                while j < len(cl):
+                    if cl[j] in singles: #clause sat, not needed anymore
+                        change = True
+                        del self._clauses[i] #remove clause
+                        i = i - 1
+                        break
+                    elif -cl[j] in singles: #remove false literal
+                        del cl[j]
+                        j = j - 1
+                        if len(cl) == 1: #newly turned single!
+                            removed_singles = True
+                            singles.add(cl[j])
+                            del self._clauses[i] #remove clause
+                            i = i - 1
+                    j = j + 1
+                i = i + 1
+            iterate = iterate + 1
+            change |= removed_singles
+
+        single_vars = set((abs(l) for l in singles))
+        self._projected = self._projected.difference(single_vars)
+        return change
+
+    def pure_lit_elim(self):
+        change = False
+        all_true = [True]*(self._max + 1)
+        all_false = [True]*(self._max + 1)
+        for c in self._clauses:
+            for l in c:
+                if l > 0:
+                    all_false[l] = False
+                else:
+                    all_true[-l] = False
+        for i in range(self._max):
+            if all_true[i] and not all_false[i] and not i in self.projected:
+                print("rem")
+                change = True
+                self._clauses.append([i])
+            elif not all_true[i] and all_false[i] and not i in self.projected:
+                print("rem")
+                change = True
+                self._clauses.append([-i])
+
+        return change
+                
                     
 
     def main(self, clingo_control, files):
@@ -379,6 +452,8 @@ class Application(object):
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
         #parser.parse(wf, semantics = sem)
+        self.encoding_stats()
+        self.simp()
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
         #self.model_to_names()
