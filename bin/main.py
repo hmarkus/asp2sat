@@ -425,11 +425,11 @@ class Application(object):
         #parser.parse(wf, semantics = sem)
         #self.encoding_stats()
         #self.simp()
-        #with open('out.cnf', mode='wb') as file_out:
-        #    self.write_dimacs(file_out)
+        with open('out.cnf', mode='wb') as file_out:
+            self.write_dimacs(file_out)
         #self.model_to_names()
         #self.encoding_stats()
-        self.my_write()
+        #self.my_write()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
