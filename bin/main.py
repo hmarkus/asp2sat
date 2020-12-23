@@ -137,6 +137,19 @@ class Application(object):
         #    print(sym.literal, sym.symbol)
 
 
+    def _computeComponents(self):
+        dep = nx.DiGraph()
+        for r in self.control.ground_program.objects:
+            if isinstance(r, ClingoRule):
+                for a in r.head:
+                    for b in r.body:
+                        if b > 0:
+                            dep.add_edge(a, b)
+        comp = nx.algorithms.strongly_connected_components(dep)
+        self._components = list(comp)
+        self._condensation = nx.algorithms.condensation(dep, self._components)
+
+
     def _decomposeGraph(self):
         # Run htd
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -195,24 +208,58 @@ class Application(object):
         return (c1, c2)
 
     # a subroutine to generate x < x'
-    def generateLessThan(self, x, xp, node):
-        if not (x,xp) in self._lessThan:
-            self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
-            self._done[(x,xp)] = set()
-        if node in self._done[(x,xp)]:
+    def generateLessThan(self, x, xp, local = False, node = None):
+        # setup and check if this has already been handled
+        if local:
+            if node == None:
+                logger.error("node cannot be None!")
+                exit(1)
+            if not (x,xp) in self._lessThan:
+                self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
+                self._done[(x,xp)] = set()
+            if node in self._done[(x,xp)]:
+                return self._lessThan[(x,xp)]
+            self._done[(x,xp)].add(node)
+        else:
+            if not (x,xp) in self._lessThan:
+                self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
+            else:
+                return self._lessThan[(x,xp)]
+
+        # check if x and xp are in differens components
+        xs_comp = self._condensation.graph["mapping"][x]
+        xps_comp = self._condensation.graph["mapping"][xp]
+        if xs_comp != xps_comp:
+            # determine which is in the higher component
+            if nx.algorithms.shortest_paths.generic.has_path(self._condensation, xs_comp, xps_comp):
+                self._clauses.append([-self._lessThan[(x,xp)]])
+            elif nx.algorithms.shortest_paths.generic.has_path(self._condensation, xps_comp, xs_comp):
+                self._clauses.append([self._lessThan[(x,xp)]])
+            else: # there is no connection between these at all. should not occur.
+                logger.error("No connection between nodes that need to be connected!")
+                exit(1)
             return self._lessThan[(x,xp)]
-        self._done[(x,xp)].add(node)
-        count = self.bits[node][0]
-        l_bits = self.bits[node][1]
+
+        # x and xp are in the same component 
+        # obtain the bits and their number
+        if local:
+            count = len(self.bits[node][x])
+            x_bits = self.bits[node][x]
+            xp_bits = self.bits[node][xp]
+        else:
+            count = len(self.bits[x])
+            x_bits = self.bits[x]
+            xp_bits = self.bits[xp]
+
         # remember all the disjuncts here
         include = []
         for i in range(count):
             include.append(self.new_var(f"disj_{i}"))
-            includeAnd = [l_bits[xp][i], -l_bits[x][i]]
+            includeAnd = [xp_bits[i], -x_bits[i]]
             for j in range(i + 1, count):
                 impVar = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}0")
                 includeAnd.append(impVar)
-                self.clause_writer(impVar, c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
+                self.clause_writer(impVar, c1 = x_bits[j], c2 = xp_bits[j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
             self._clauses.append([include[-1]] + [-x for x in includeAnd])
             for v in includeAnd:
                 self._clauses.append([-include[-1], v])
@@ -222,34 +269,54 @@ class Application(object):
             self._clauses.append([self._lessThan[(x,xp)], -v])
         return self._lessThan[(x,xp)]
                          
+    def generate_bits(self, local = False):
+        # remember which atoms we used for the bits 
+        self.bits = {}
+        if local:
+            for t in self._td.nodes:
+                t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
+                self.bits[t] = {}
+                tmp_at = t.atoms.copy()
+                while not len(tmp_at) == 0:
+                    cur = tmp_at.pop()
+                    comp_id = self._condensation.graph["mapping"][cur]
+                    comp = self._condensation.nodes[comp_id]["members"]
+                    tmp_at = tmp_at.difference(comp)
+                    both = t.atoms.intersection(comp)
+                    count = math.ceil(math.log(len(both),2))
+                    for a in both:
+                        self.bits[t][a] = []
+                        #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
+                        #self._max += count
+                        for i in range(count):
+                            self.bits[t][a].append(self.new_var(f"b_{a}_{t}^{i}"))
+        else:
+            for comp in self._components:
+                count = math.ceil(math.log(len(comp),2))
+                for a in comp:
+                    self.bits[a] = [0]*count
+                    for i in range(count):
+                        self.bits[a][i] = self.new_var(f"b_{a}^{i}")
 
-    def _tdguidedReduction(self):
+
+
+    def _tdguidedReduction(self, local = False):
         # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
         # this is the case if there is a rule suitable for proving a in or below t
         proven_at_atoms = {}
         proven_below_atoms = {}
-        # remember which atoms we used for the bits 
-        self.bits = {}
         # maps a node t to a set of rules that need to be considered in t
         # it actually suffices if every rule is considered only once in the entire td..
         rules = {}
         # temporary copy of the program, will be empty after the first pass
         program = list(self._program)
+        self.generate_bits(local)
         # first td pass: determine rules and prove_atoms
         for t in self._td.nodes:
             rules[t] = []
             proven_at_atoms[t] = {}
             # compute t.atoms
             t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
-            # generate the variables for the bits for each atom of the node
-            count = math.ceil(math.log(max(len(t.atoms), 2), 2))
-            self.bits[t] = (count, {})
-            for a in t.atoms:
-                self.bits[t][1][a] = []
-                #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
-                #self._max += count
-                for i in range(count):
-                    self.bits[t][1][a].append(self.new_var(f"b_{a}_{t}^{i}"))
             # take the rules we need and remove them
             rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
             program = [r for r in program if not r.atoms.issubset(t.atoms)]
@@ -275,14 +342,23 @@ class Application(object):
                 if not r.choice: # FIXME: is this really all we need to do to make sure that choice rules are handled correctly?
                     self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
 
-            # generate (2), i.e. the constraints that maintain the inequalities between nodes
-            for tp in t.children:
-                relevant = tp.atoms.intersection(t.atoms)
-                for x, xp in product(relevant, relevant):
-                    if x == xp:
-                        continue
-                    self.generateLessThan(x, xp, t)
-                    self.generateLessThan(x, xp, tp)
+            if local:
+                # generate (2), i.e. the constraints that maintain the inequalities between nodes
+                # FIXME: use the components here
+                for tp in t.children:
+                    relevant = tp.atoms.intersection(t.atoms)
+                    rel_cp = relevant.copy()
+                    while not len(rel_cp) == 0:
+                        cur = rel_cp.pop()
+                        comp_id = self._condensation.graph["mapping"][cur]
+                        comp = self._condensation.nodes[comp_id]["members"]
+                        tmp_at = rel_cp.difference(comp)
+                        both = relevant.intersection(comp)
+                        for x, xp in product(both, both):
+                            if x == xp:
+                                continue
+                            self.generateLessThan(x, xp, local = local, node = t)
+                            self.generateLessThan(x, xp, local = local, node = tp)
             
             # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
             for tp in t.children: 
@@ -300,7 +376,7 @@ class Application(object):
                         for a in r.body:
                             if a > 0:
                                 includeAnd.append(self._atomToVertex[a])
-                                includeAnd.append(self.generateLessThan(a, x, t))
+                                includeAnd.append(self.generateLessThan(a, x, local = local, node = t))
                             if a < 0:
                                 includeAnd.append(-self._atomToVertex[-a])
                         for a in r.head:
@@ -374,20 +450,12 @@ class Application(object):
             file_out.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
 
     def stats(self):
-        dep = nx.DiGraph()
-        for r in self._program:
-            for a in r.head:
-                for b in r.body:
-                    if b > 0:
-                        dep.add_edge(a, b)
-        comp = nx.algorithms.strongly_connected_components(dep)
-        comp = list(comp)
-        largest = max(comp, key=len)
+        largest = max(self._components, key=len)
         logger.info(f"Largest CC has size {len(largest)}")
         local_max = 0
         sum_max = 0
         for t in self._td.nodes:
-            local_comp = [set(c).intersection(t.atoms) for c in comp]
+            local_comp = [set(c).intersection(t.atoms) for c in self._components]
             here_max = len(max(local_comp, key=len))
             local_max = max(local_max, here_max)
             sum_max += here_max
@@ -433,13 +501,15 @@ class Application(object):
         logger.info("------------------------------------------------------------")
         logger.info(self.control.ground_program)
         logger.info("------------------------------------------------------------")
+        
+        self._computeComponents();
 
         self._generatePrimalGraph()
         logger.info(self._graph.edges())
 
 
         self._decomposeGraph()
-        self._tdguidedReduction()
+        self._tdguidedReduction(local = False)
         #parser = wfParse.WeightedFormulaParser()
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
