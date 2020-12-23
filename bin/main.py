@@ -8,7 +8,7 @@ from collections import OrderedDict
 import clingo
 #import clingoext
 from pprint import pprint
-#import networkx as nx
+import networkx as nx
 #import lib.htd_validate
 #from groundprogram import ClingoRule
 import os
@@ -134,6 +134,19 @@ class Application(object):
         #    print(sym.literal, sym.symbol)
 
 
+    def _computeComponents(self):
+        dep = nx.DiGraph()
+        for r in self.control.ground_program.objects:
+            if isinstance(r, ClingoRule):
+                for a in r.head:
+                    for b in r.body:
+                        if b > 0:
+                            dep.add_edge(a, b)
+        comp = nx.algorithms.strongly_connected_components(dep)
+        self._components = list(comp)
+        self._condensation = nx.algorithms.condensation(dep, self._components)
+
+
     def _decomposeGraph(self):
         # Run htd
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -191,6 +204,32 @@ class Application(object):
             self._clauses.append([-p, -c1, -c2])
         return (c1, c2)
 
+        # a subroutine to generate x < x'
+    def getLessThan(self, x, xp):
+        # setup and check if this has already been handled
+        if not (x,xp) in self._lessThan:
+            self._lessThan[(x,xp)] = self.new_var(f"{x}<{xp}")
+        else:
+            return self._lessThan[(x,xp)]
+
+        # check if x and xp are in differens components
+        xs_comp = self._condensation.graph["mapping"][x]
+        xps_comp = self._condensation.graph["mapping"][xp]
+        if xs_comp != xps_comp:
+            # determine which is in the higher component
+            if nx.algorithms.shortest_paths.generic.has_path(self._condensation, xs_comp, xps_comp):
+                self._clauses.append([-self._lessThan[(x,xp)]])
+            elif nx.algorithms.shortest_paths.generic.has_path(self._condensation, xps_comp, xs_comp):
+                self._clauses.append([self._lessThan[(x,xp)]])
+            else: # there is no connection between these at all. should not occur.
+                logger.error("No connection between nodes that need to be connected!")
+                exit(1)
+            return self._lessThan[(x,xp)]
+
+        # x and xp are in the same component 
+        logger.error("x and xp are in the same component in the same node but x < xp has not been generated.")
+        exit(1)
+
     def _tdguidedReduction(self):
         # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
         # this is the case if there is a rule suitable for proving a in or below t
@@ -208,19 +247,26 @@ class Application(object):
             # compute t.atoms
             t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
             # generate the lessThan atoms
-            for tup in product(t.atoms, t.atoms):
-                if tup[0] != tup[1] and tup not in self._lessThan:
-                    self._lessThan[tup] = self.new_var(f"{tup[0]}<{tup[1]}")
-            # antisymmetry and connexity
-            for (x,y) in product(t.atoms, t.atoms):
-                if x != y:
-                    self._clauses.append([-self._lessThan[(x,y)], -self._lessThan[(y,x)]])
-                    self._clauses.append([self._lessThan[(x,y)], self._lessThan[(y,x)]])
+            rel_cp = t.atoms.copy()
+            while not len(rel_cp) == 0:
+                cur = rel_cp.pop()
+                comp_id = self._condensation.graph["mapping"][cur]
+                comp = self._condensation.nodes[comp_id]["members"]
+                tmp_at = rel_cp.difference(comp)
+                both = t.atoms.intersection(comp)
+                for tup in product(both, both):
+                    if tup[0] != tup[1] and tup not in self._lessThan:
+                        self._lessThan[tup] = self.new_var(f"{tup[0]}<{tup[1]}")
+                # antisymmetry and connexity
+                for (x,y) in product(both, both):
+                    if x != y:
+                        self._clauses.append([-self._lessThan[(x,y)], -self._lessThan[(y,x)]])
+                        self._clauses.append([self._lessThan[(x,y)], self._lessThan[(y,x)]])
 
-            # transitivity
-            for (x,y,z) in product(t.atoms, t.atoms, t.atoms):
-                if x != y and y != z and x != z:
-                    self._clauses.append([-self._lessThan[(x,y)], -self._lessThan[(y,z)], self._lessThan[(x,z)]])
+                # transitivity
+                for (x,y,z) in product(both, both, both):
+                    if x != y and y != z and x != z:
+                        self._clauses.append([-self._lessThan[(x,y)], -self._lessThan[(y,z)], self._lessThan[(x,z)]])
             # take the rules we need and remove them
             rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
             program = [r for r in program if not r.atoms.issubset(t.atoms)]
@@ -262,7 +308,7 @@ class Application(object):
                         for a in r.body:
                             if a > 0:
                                 includeAnd.append(self._atomToVertex[a])
-                                includeAnd.append(self._lessThan[(a,x)])
+                                includeAnd.append(self.getLessThan(a,x))
                             if a < 0:
                                 includeAnd.append(-self._atomToVertex[-a])
                         for a in r.head:
@@ -306,6 +352,21 @@ class Application(object):
             file_out.write(("\n".join([str(v) for v in self._projected])).encode())
         with open('pv.var', mode='wb') as file_out:
             file_out.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
+
+    def stats(self):
+        largest = max(self._components, key=len)
+        logger.info(f"Largest CC has size {len(largest)}")
+        local_max = 0
+        sum_max = 0
+        for t in self._td.nodes:
+            local_comp = [set(c).intersection(t.atoms) for c in self._components]
+            here_max = len(max(local_comp, key=len))
+            local_max = max(local_max, here_max)
+            sum_max += here_max
+
+        logger.info(f"Largest locally largest CC has size {local_max}")
+        logger.info(f"Average locally largest CC has size {sum_max/len(self._td.nodes)}")
+        self.encoding_stats()
 
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
@@ -413,6 +474,7 @@ class Application(object):
         logger.info(self.control.ground_program)
         logger.info("------------------------------------------------------------")
 
+        self._computeComponents()
         self._generatePrimalGraph()
         logger.info(self._graph.edges())
 
@@ -430,6 +492,7 @@ class Application(object):
         #self.model_to_names()
         #self.encoding_stats()
         #self.my_write()
+        self.stats()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
