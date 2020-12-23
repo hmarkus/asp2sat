@@ -8,7 +8,7 @@ from collections import OrderedDict
 import clingo
 #import clingoext
 from pprint import pprint
-#import networkx as nx
+import networkx as nx
 #import lib.htd_validate
 #from groundprogram import ClingoRule
 import os
@@ -373,6 +373,32 @@ class Application(object):
         with open('pv.var', mode='wb') as file_out:
             file_out.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
 
+    def stats(self):
+        dep = nx.DiGraph()
+        for r in self._program:
+            for a in r.head:
+                for b in r.body:
+                    if b > 0:
+                        dep.add_edge(a, b)
+        comp = nx.algorithms.strongly_connected_components(dep)
+        comp = list(comp)
+        largest = max(comp, key=len)
+        logger.info(f"Largest CC has size {len(largest)}")
+        local_max = 0
+        sum_max = 0
+        for t in self._td.nodes:
+            local_comp = [set(c).intersection(t.atoms) for c in comp]
+            here_max = len(max(local_comp, key=len))
+            local_max = max(local_max, here_max)
+            sum_max += here_max
+
+        logger.info(f"Largest locally largest CC has size {local_max}")
+        logger.info(f"Average locally largest CC has size {sum_max/len(self._td.nodes)}")
+        self.encoding_stats()
+
+
+            
+
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -424,7 +450,7 @@ class Application(object):
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
         #self.model_to_names()
-        #self.encoding_stats()
+        self.stats()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
