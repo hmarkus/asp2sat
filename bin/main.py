@@ -2,6 +2,7 @@
 Main module providing the application logic.
 """
 
+import matplotlib.pyplot as plt
 import sys
 # from textwrap import dedent
 from collections import OrderedDict
@@ -138,16 +139,16 @@ class Application(object):
 
 
     def _computeComponents(self):
-        dep = nx.DiGraph()
+        self.dep = nx.DiGraph()
         for r in self.control.ground_program.objects:
             if isinstance(r, ClingoRule):
                 for a in r.head:
                     for b in r.body:
                         if b > 0:
-                            dep.add_edge(a, b)
-        comp = nx.algorithms.strongly_connected_components(dep)
+                            self.dep.add_edge(a, b)
+        comp = nx.algorithms.strongly_connected_components(self.dep)
         self._components = list(comp)
-        self._condensation = nx.algorithms.condensation(dep, self._components)
+        self._condensation = nx.algorithms.condensation(self.dep, self._components)
 
 
     def _decomposeGraph(self):
@@ -292,7 +293,13 @@ class Application(object):
                             self.bits[t][a].append(self.new_var(f"b_{a}_{t}^{i}"))
         else:
             for comp in self._components:
-                count = math.ceil(math.log(len(comp),2))
+                cur_max = 0
+                # FIXME: in case of preformance issues comment this out and replace it with the line that is commented out
+                for x in comp:
+                    for y in comp:
+                        cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
+                count = math.ceil(math.log(cur_max,2))
+                #count = math.ceil(math.log(len(comp),2))
                 for a in comp:
                     self.bits[a] = [0]*count
                     for i in range(count):
@@ -452,6 +459,15 @@ class Application(object):
     def stats(self):
         largest = max(self._components, key=len)
         logger.info(f"Largest CC has size {len(largest)}")
+        # comment out to see plots of the dependency graph
+        #alle = set.union(*self._components)
+        #irrelevant = alle.difference(largest)
+        #restricted = nx.restricted_view(self.dep, irrelevant, [])
+        #nx.draw(self.dep)
+        #plt.show()
+        #nx.draw(restricted)
+        #plt.show()
+
         local_max = 0
         sum_max = 0
         for t in self._td.nodes:
