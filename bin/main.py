@@ -280,26 +280,29 @@ class Application(object):
                 tmp_at = t.atoms.copy()
                 while not len(tmp_at) == 0:
                     cur = tmp_at.pop()
-                    comp_id = self._condensation.graph["mapping"][cur]
-                    comp = self._condensation.nodes[comp_id]["members"]
-                    tmp_at = tmp_at.difference(comp)
-                    both = t.atoms.intersection(comp)
-                    count = math.ceil(math.log(len(both),2))
-                    for a in both:
-                        self.bits[t][a] = []
-                        #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
-                        #self._max += count
-                        for i in range(count):
-                            self.bits[t][a].append(self.new_var(f"b_{a}_{t}^{i}"))
+                    if cur in self._condensation.graph["mapping"]:
+                        # otherwise cur does not occur positively
+                        comp_id = self._condensation.graph["mapping"][cur]
+                        comp = self._condensation.nodes[comp_id]["members"]
+                        tmp_at = tmp_at.difference(comp)
+                        both = t.atoms.intersection(comp)
+                        count = math.ceil(math.log(len(both),2))
+                        for a in both:
+                            self.bits[t][a] = []
+                            #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
+                            #self._max += count
+                            for i in range(count):
+                                self.bits[t][a].append(self.new_var(f"b_{a}_{t}^{i}"))
+
         else:
             for comp in self._components:
                 cur_max = 0
                 # FIXME: in case of preformance issues comment this out and replace it with the line that is commented out
-                for x in comp:
-                    for y in comp:
-                        cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
-                count = math.ceil(math.log(cur_max,2))
-                #count = math.ceil(math.log(len(comp),2))
+                #for x in comp:
+                #    for y in comp:
+                #        cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
+                #count = math.ceil(math.log(cur_max,2))
+                count = math.ceil(math.log(len(comp),2))
                 for a in comp:
                     self.bits[a] = [0]*count
                     for i in range(count):
