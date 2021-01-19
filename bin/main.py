@@ -68,6 +68,10 @@ class Application(object):
         self.program_name = "clingoext"
         self.version = "0.0.1"
         self.config = AppConfig()
+        # the variable counter
+        self._max = 0
+        # map between variables and their name
+        self._nameMap = {}
         # store the weights of literals here
         self._weights = {}
         # store the clauses here
@@ -77,6 +81,9 @@ class Application(object):
         # remember one variable for x <_t x' regardless of t
         self._lessThan = {}
         self._done = {}
+        self._copies = {}
+        self._clauses.append([1])
+        self.new_var("true")
 
     def _read(self, path):
         if path == "-":
@@ -106,14 +113,24 @@ class Application(object):
                 tmp.append(o)
         self.control.ground_program.objects = tmp
 
+    def _computeComponents(self):
+        self.dep = nx.DiGraph()
+        for r in self.control.ground_program.objects:
+            if isinstance(r, ClingoRule):
+                for a in r.head:
+                    for b in r.body:
+                        if b > 0:
+                            self.dep.add_edge(b, a)
+        comp = nx.algorithms.strongly_connected_components(self.dep)
+        self._components = list(comp)
+        self._condensation = nx.algorithms.condensation(self.dep, self._components)
+
     def _generatePrimalGraph(self):
         self.remove_tautologies()
         self._graph = hypergraph.Hypergraph()
         self._program = []
         self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
         self._vertexToAtom = {} # inverse mapping of _atomToVertex 
-        self._max = 0
-        self._nameMap = {}
         unary = []
         for o in self.control.ground_program.objects:
             if isinstance(o, ClingoRule):
@@ -126,14 +143,21 @@ class Application(object):
                         self._vertexToAtom[self._max] = a
                     self._graph.add_hyperedge(tuple(map(lambda x: self._atomToVertex[x], o.atoms)))
                 else:
-                    unary.append(o)
+                    if o.choice:
+                        unary.append(o)
         for o in unary:
             for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
                 self._atomToVertex[a] = self.new_var(str(a))
                 self._vertexToAtom[self._max] = a
 
+        for i in range(2, self._max + 1):
+            self._copies[i] = {}
+            self._copies[i][0] = i
+
+        for sym in self.control.symbolic_atoms:
+            if sym.literal in self._atomToVertex:
+                print(self._atomToVertex[sym.literal], sym.symbol)
         #for sym in self.control.symbolic_atoms:
-        #    print(self._atomToVertex[sym.literal], sym.symbol)
         #    print(sym.literal, sym.symbol)
 
 
@@ -172,15 +196,67 @@ class Application(object):
             self._clauses.append([-p, -c1, -c2])
         return (c1, c2)
 
-    def _tdguidedReduction(self, local = False):
-        # temporary copy of the program, will be empty after the first pass
-        program = list(self._program)
+    def getAtom(self, atom, i):
+        var = self._atomToVertex[abs(atom)]
+        if var in self._projected:
+            return var if atom > 0 else -var
+        if i < 0:
+            return -1 if atom > 0 else 1
+        if var not in self._copies:
+            self._copies[var] = {}
+        if i not in self._copies[var]:
+            self._copies[var][i] = self.new_var("")
+        return self._copies[var][i] if atom > 0 else -self._copies[var][i]
+
+
+    def _reduction(self):
         #take care of the rules
-        for r in program:
-            if not r.choice: 
-                self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
-            else: 
+        self._atoms = set()
+        self._constraints = []
+        for r in self._program:
+            if r.choice: 
                 self._projected.add(self._atomToVertex[r.head[0]])
+            elif len(r.head) > 0:
+                self._atoms.add(r.head[0])
+            else:
+                self._constraints.append(r)
+        self._perAtom = {}
+        for a in self._atoms:
+            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
+        
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            for i in range(len(comp)):
+                for a in comp:
+                    if self._atomToVertex[a] in self._projected:
+                        continue
+                    head = self.getAtom(a, i)
+                    ors = []
+                    for r in self._perAtom[a]:
+                        ors.append(self.new_var(f"{r}.{i}"))
+                        ands = []
+                        for x in r.body:
+                            x = -x
+                            if abs(x) in comp:
+                                ands.append(self.getAtom(x, i - 1))
+                            else:
+                                other = self._condensation.graph["mapping"][abs(x)]
+                                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
+                        self._clauses.append([ors[-1]] + ands)
+                        for at in ands:
+                            self._clauses.append([-ors[-1], -at])
+                    self._clauses.append([-head] + [o for o in ors])
+                    for o in ors:
+                        self._clauses.append([head, -o])
+
+        for r in self._constraints:
+            ands = []
+            for x in r.body:
+                x = -x
+                other = self._condensation.graph["mapping"][abs(x)]
+                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
+            self._clauses.append(ands)
 
     # function for debugging
     def model_to_names(self):
@@ -200,13 +276,8 @@ class Application(object):
 
     def write_dimacs(self, stream):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
-        stream.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
-        #f = open("named.cnf", "w")
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
-            #f.write(" ".join([self._nameMap[v] if v > 0 else f"-{self._nameMap[abs(v)]}" for v in c]) + "\n")
-        #for (a, w) in self._weights.items():
-        #    stream.write(f"w {a} {w}\n".encode())
 
     def print_prog(self, rules):
         def getName(v):
@@ -262,8 +333,9 @@ class Application(object):
         logger.info("------------------------------------------------------------")
 
         self._generatePrimalGraph()
+        self._computeComponents()
         
-        self._tdguidedReduction(local = False)
+        self._reduction()
         #parser = wfParse.WeightedFormulaParser()
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
