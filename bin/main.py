@@ -160,6 +160,26 @@ class Application(object):
         #for sym in self.control.symbolic_atoms:
         #    print(sym.literal, sym.symbol)
 
+    def _decomposeGraph(self):
+        # Run htd
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        #logger.info("Parsing input file")
+        #input = problem.prepare_input(file)
+        #if "gr_file" in kwargs and kwargs["gr_file"]:
+        #    logger.info("Writing graph file")
+        #    with FileWriter(kwargs["gr_file"]) as fw:
+        #        fw.write_gr(*input)
+        logger.info("Running htd")
+        #with open('graph.txt', mode='wb') as file_out:
+        #    self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        p.stdin.close()
+        tdr = reader.TdReader.from_stream(p.stdout)
+        p.wait()
+        logger.info("TD computed")
+        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
+        logger.info(self._td.nodes)
 
     # write a single clause
     # connective == 0 -> and, == 1 -> or, == 2 -> impl, == 3 -> iff, == 4 -> *, == 5 -> +
@@ -208,9 +228,16 @@ class Application(object):
             self._copies[var][i] = self.new_var("")
         return self._copies[var][i] if atom > 0 else -self._copies[var][i]
 
-
     def _reduction(self):
-        #take care of the rules
+        # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
+        # this is the case if there is a rule suitable for proving a in or below t
+        prove_atoms = {}
+        proven_at_atoms = {}
+        proven_below_atoms = {}
+        # maps a node t to a set of rules that need to be considered in t
+        # it actually suffices if every rule is considered only once in the entire td..
+        rules = {}
+        # differentiate types of rules and put them into the correct category
         self._atoms = set()
         self._constraints = []
         for r in self._program:
@@ -220,36 +247,109 @@ class Application(object):
                 self._atoms.add(r.head[0])
             else:
                 self._constraints.append(r)
-        self._perAtom = {}
-        for a in self._atoms:
-            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
-        
-        ts = nx.topological_sort(self._condensation)
-        for t in ts:
-            comp = self._condensation.nodes[t]["members"]
-            for i in range(len(comp)):
-                for a in comp:
-                    if self._atomToVertex[a] in self._projected:
-                        continue
-                    head = self.getAtom(a, i)
-                    ors = []
-                    for r in self._perAtom[a]:
-                        ors.append(self.new_var(f"{r}.{i}"))
-                        ands = []
-                        for x in r.body:
-                            x = -x
-                            if abs(x) in comp:
-                                ands.append(self.getAtom(x, i - 1))
-                            else:
-                                other = self._condensation.graph["mapping"][abs(x)]
-                                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
-                        self._clauses.append([ors[-1]] + ands)
-                        for at in ands:
-                            self._clauses.append([-ors[-1], -at])
-                    self._clauses.append([-head] + [o for o in ors])
-                    for o in ors:
-                        self._clauses.append([head, -o])
+        # temporary copy of the program, will be empty after the first pass
+        program = list(self._program)
+        # first td pass: determine rules and prove_atoms
+        for t in self._td.nodes:
+            prove_atoms[t] = set()
+            proven_below_atoms[t] = {}
+            proven_at_atoms[t] = {}
+            # compute t.atoms
+            t.atoms = set([self._vertexToAtom[x] for x in t.vertices if x in self._vertexToAtom])
+            # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
+            for tp in t.children:
+                prove_atoms[t].update(prove_atoms[tp].intersection(t.atoms))
+                for a in prove_atoms[tp].intersection(t.atoms):
+                    if a not in proven_below_atoms[t]:
+                        comp = self._condensation.graph["mapping"][abs(a)]
+                        comp = self._condensation.nodes[comp]["members"]
+                        proven_below_atoms[t][a] = [self.new_var(f"p_<{t}^{a}iter{i}") for i in range(len(comp))]
+            # take the rules we need and remove them
+            rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
+            program = [r for r in program if not r.atoms.issubset(t.atoms)]
+            for r in rules[t]:
+                prove_atoms[t].update(r.head)
+                for a in r.head:
+                    if a not in proven_at_atoms[t]:
+                        comp = self._condensation.graph["mapping"][abs(a)]
+                        comp = self._condensation.nodes[comp]["members"]
+                        proven_at_atoms[t][a] = [self.new_var(f"p_{t}^{a}iter{i}") for i in range(len(comp))]
+                    if a not in proven_below_atoms[t]:
+                        comp = self._condensation.graph["mapping"][abs(a)]
+                        comp = self._condensation.nodes[comp]["members"]
+                        proven_below_atoms[t][a] = [self.new_var(f"p_<{t}^{a}iter{i}") for i in range(len(comp))]
 
+            # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
+            for tp in t.children: 
+                relevant = tp.atoms.difference(t.atoms)
+                for a in relevant:
+                    if a in proven_below_atoms[tp]:
+                        comp = self._condensation.graph["mapping"][abs(a)]
+                        comp = self._condensation.nodes[comp]["members"]
+                        for i in range(len(comp)):
+                            self._clauses.append([-self.getAtom(a, i), proven_below_atoms[tp][a][i]])
+                        #TODO other dir?
+                    else:
+                        # if we do not have a possibility to prove that a is stable, we can assert it to be false
+                        comp = self._condensation.graph["mapping"][abs(a)]
+                        comp = self._condensation.nodes[comp]["members"]
+                        for i in range(len(comp)):
+                            self._clauses.append([-self.getAtom(a, i)])
+            
+            # generate (5), i.e. the propogation of things that were proven
+            for a in prove_atoms[t]:
+                comp = self._condensation.graph["mapping"][abs(a)]
+                comp = self._condensation.nodes[comp]["members"]
+                for i in range(len(comp)):
+                    include = []
+                    if a in proven_at_atoms[t]:
+                        include.append(proven_at_atoms[t][a][i])
+                    for tp in t.children:
+                        if a in proven_below_atoms[tp]:
+                            include.append(proven_below_atoms[tp][a][i])
+                    self._clauses.append([-proven_below_atoms[t][a][i]] + include)
+                    for v in include:
+                        self._clauses.append([proven_below_atoms[t][a][i], -v])
+
+            # generate (6), i.e. the check for whether an atom was proven at the current node
+            for x in proven_at_atoms[t]:
+                comp = self._condensation.graph["mapping"][abs(x)]
+                comp = self._condensation.nodes[comp]["members"]
+                for i in range(len(comp)):
+                    include = []
+                    for r in rules[t]:
+                        if x in r.head:
+                            cur = self.new_var(f"{x} proven by {r} at {t} iter {i}")
+                            include.append(cur)        
+                            ands = []
+                            for a in r.body:
+                                a = -a
+                                if abs(a) in comp:
+                                    ands.append(self.getAtom(a, i - 1))
+                                else:
+                                    other = self._condensation.graph["mapping"][abs(a)]
+                                    ands.append(self.getAtom(a, len(self._condensation.nodes[other]["members"]) - 1))
+                            self._clauses.append([include[-1]] + ands)
+                            for at in ands:
+                                self._clauses.append([-include[-1], -at])
+                    self._clauses.append([-proven_at_atoms[t][x][i]] + include)
+                    for v in include:
+                        self._clauses.append([proven_at_atoms[t][x][i], -v])
+            
+        # generate (4), i.e. the constraints that ensure that true atoms in the root are proven
+        for a in self._td.root.atoms:
+            if a in proven_below_atoms[self._td.root]:
+                comp = self._condensation.graph["mapping"][abs(a)]
+                comp = self._condensation.nodes[comp]["members"]
+                for i in range(len(comp)):
+                    self._clauses.append([-self.getAtom(a, i), proven_below_atoms[self._td.root][a][i]])
+            else:
+                comp = self._condensation.graph["mapping"][abs(a)]
+                comp = self._condensation.nodes[comp]["members"]
+                for i in range(len(comp)):
+                    self._clauses.append([-self.getAtom(a, i)])
+
+        # ensure that the constraints are satisfied
         for r in self._constraints:
             ands = []
             for x in r.body:
@@ -257,6 +357,8 @@ class Application(object):
                 other = self._condensation.graph["mapping"][abs(x)]
                 ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
             self._clauses.append(ands)
+
+
 
     # function for debugging
     def model_to_names(self):
@@ -333,6 +435,7 @@ class Application(object):
         logger.info("------------------------------------------------------------")
 
         self._generatePrimalGraph()
+        self._decomposeGraph()
         self._computeComponents()
         
         self._reduction()
