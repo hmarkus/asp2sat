@@ -49,6 +49,8 @@ from dpdb.writer import StreamWriter
 
 import wfParse
 
+from pysdd.sdd import SddManager, Vtree
+
 class AppConfig(object):
     """
     Class for application specific options.
@@ -82,6 +84,8 @@ class Application(object):
         self._lessThan = {}
         self._done = {}
         self._copies = {}
+        self._sdds = {}
+        self._len = {}
         self._clauses.append([1])
         self.new_var("true")
 
@@ -208,8 +212,92 @@ class Application(object):
             self._copies[var][i] = self.new_var("")
         return self._copies[var][i] if atom > 0 else -self._copies[var][i]
 
+    def getSDD(self, atom, i, manager):
+        var = self._atomToVertex[abs(atom)]
+        if var in self._projected:
+            return manager.literal((self._projectedList.index(var) + 1) * (1 if atom > 0 else -1))
+        if i < 0:
+            return manager.false() if atom > 0 else manager.true()
+        if var not in self._sdds or i not in self._sdds[var]:
+            print("This should not happen!")
+            return None
+        if atom < 0:
+            print("This should not happen!")
+            return None
+        return self._sdds[var][i]
 
-    def _reduction(self):
+    def setSDD(self, atom, i, sdd):
+        var = self._atomToVertex[abs(atom)]
+        if var not in self._sdds:
+            self._sdds[var] = {}
+        if i in self._sdds[var]:
+            print("This should not happen!")
+        self._sdds[var][i] = sdd
+        sdd.ref()
+
+    def deref(self, comp, i):
+        for atom in comp:
+            var = self._atomToVertex[abs(atom)]
+            self._sdds[var][i].deref()
+
+    def _buildSDD(self):
+        #take care of the rules
+        for r in self._program:
+            if r.choice: 
+                self._projected.add(self._atomToVertex[r.head[0]])
+            elif len(r.head) > 0:
+                self._atoms.add(r.head[0])
+            else:
+                self._constraints.append(r)
+        self._perAtom = {}
+        for a in self._atoms:
+            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
+
+        self._projectedList = list(self._projected)
+
+        vtree = Vtree(var_count=len(self._projected), vtree_type="balanced".encode())
+        manager = SddManager(auto_gc_and_minimize=True, vtree=vtree)
+
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            cur_max = 0
+            for x in comp:
+                for y in comp:
+                    cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
+            self._len[t] = cur_max
+            print(cur_max, len(comp))
+            for i in range(cur_max):
+                for a in comp:
+                    if self._atomToVertex[a] in self._projected:
+                        continue
+                    ors = []
+                    for r in self._perAtom[a]:
+                        ands = []
+                        for x in r.body:
+                            if abs(x) in comp:
+                                ands.append(self.getSDD(x, i - 1, manager))
+                            else:
+                                other = self._condensation.graph["mapping"][abs(x)]
+                                ands.append(self.getSDD(x, self._len[other] - 1, manager))
+                        body = manager.true()
+                        for node in ands:
+                            body = manager.conjoin(body, node)
+                        if body != None:
+                            ors.append(body)
+                    head = manager.false()
+                    for node in ors:
+                        head = manager.disjoin(head, node)
+                    if head != None:
+                        self.setSDD(a, i, head)
+                    else:
+                        print("this should not happen!")
+                if i > 0:
+                    self.deref(comp, i - 1)
+
+
+
+    def _breakCycles(self, stream):
         #take care of the rules
         self._atoms = set()
         self._constraints = []
@@ -232,20 +320,77 @@ class Application(object):
                     if self._atomToVertex[a] in self._projected:
                         continue
                     head = self.getAtom(a, i)
-                    ors = []
                     for r in self._perAtom[a]:
-                        ors.append(self.new_var(f"{r}.{i}"))
                         ands = []
                         for x in r.body:
-                            x = -x
                             if abs(x) in comp:
                                 ands.append(self.getAtom(x, i - 1))
                             else:
                                 other = self._condensation.graph["mapping"][abs(x)]
                                 ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
-                        self._clauses.append([ors[-1]] + ands)
-                        for at in ands:
-                            self._clauses.append([-ors[-1], -at])
+                        body = ",".join([f"p({x})" for x in ands])
+                        stream.write((f"p({head}):-{body}.\n").encode())
+
+        for a in self._projected:
+            stream.write((f"0.5::p({a}).\n").encode())
+
+        for r in self._constraints:
+            ands = []
+            for x in r.body:
+                other = self._condensation.graph["mapping"][abs(x)]
+                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
+            body = ",".join([f"p({x})" for x in ands])
+            stream.write((f"query({body}).\n").encode())
+
+
+    def _reduction(self):
+        #take care of the rules
+        self._atoms = set()
+        self._constraints = []
+        for r in self._program:
+            if r.choice: 
+                self._projected.add(self._atomToVertex[r.head[0]])
+            elif len(r.head) > 0:
+                self._atoms.add(r.head[0])
+            else:
+                self._constraints.append(r)
+        self._perAtom = {}
+        for a in self._atoms:
+            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
+        
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            cur_max = 0
+            for x in comp:
+                for y in comp:
+                    cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
+            #cur_max = 2*len(comp)
+            self._len[t] = cur_max
+            print(cur_max, len(comp))
+            for i in range(cur_max):
+                for a in comp:
+                    if self._atomToVertex[a] in self._projected:
+                        continue
+                    head = self.getAtom(a, i)
+                    ors = []
+                    for r in self._perAtom[a]:
+                        add = True
+                        ands = []
+                        for x in r.body:
+                            x = -x
+                            if abs(x) in comp:
+                                if i == 0:
+                                    add = False
+                                ands.append(self.getAtom(x, i - 1))
+                            else:
+                                other = self._condensation.graph["mapping"][abs(x)]
+                                ands.append(self.getAtom(x, self._len[other] - 1))
+                        if add:
+                            ors.append(self.new_var(f"{r}.{i}"))
+                            self._clauses.append([ors[-1]] + ands)
+                            for at in ands:
+                                self._clauses.append([-ors[-1], -at])
                     self._clauses.append([-head] + [o for o in ors])
                     for o in ors:
                         self._clauses.append([head, -o])
@@ -290,10 +435,8 @@ class Application(object):
             res += ":-"
             res += ",".join([("not " if v < 0 else "") + getName(abs(v)) for v in r.body])
             return res
-        for t in self._td.nodes:
-            print(t)
-            for r in rules[t]:
-                print(printrule(r))
+        for r in rules:
+            print(printrule(r))
                 
 
     def encoding_stats(self):
@@ -343,6 +486,9 @@ class Application(object):
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
         self.encoding_stats()
+        #with open('out.lp', mode='wb') as file_out:
+        #    self._breakCycles(file_out)
+        #self._buildSDD()
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
