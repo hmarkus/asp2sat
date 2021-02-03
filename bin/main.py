@@ -19,6 +19,8 @@ import subprocess
 import math
 from itertools import product
 
+import queue
+
 # set library path
 
 # TODO: fixme
@@ -45,7 +47,9 @@ from clingoext import ClingoRule
 from dpdb import reader
 from dpdb import treedecomp
 from dpdb.problems.sat_util import *
-from dpdb.writer import StreamWriter
+from dpdb.writer import StreamWriter, FileWriter
+from dpdb.reader import CnfReader
+import tempfile
 
 import wfParse
 
@@ -117,6 +121,78 @@ class Application(object):
                 tmp.append(o)
         self.control.ground_program.objects = tmp
 
+    def remove_irrelevant(self):
+        used = set()
+        projected = set()
+        atoms = set()
+        constraints = []
+        constraint_atoms = set()
+        for r in self.control.ground_program.objects:
+            r_idx = self.control.ground_program.objects.index(r)
+            if r.choice: 
+                projected.add(r.head[0])
+                used.add(r_idx)
+            elif len(r.head) > 0 and len(r.body) > 0:
+                atoms.add(r.head[0])
+            else:
+                used.add(r_idx)
+                constraints.append(r)
+                constraint_atoms = constraint_atoms.union(set([abs(x) for x in r.body]))
+        perAtom = {}
+        for a in atoms:
+            perAtom[a] = [r for r in self.control.ground_program.objects if len(r.head) > 0 and r.head[0] == a]
+        relevant = {}
+
+        in_q = set()
+        def put(t):
+            if t not in in_q:
+                in_q.add(t)
+                q.put(t)
+        
+        def get():
+            res = q.get()
+            in_q.remove(res)
+            return res
+
+        q = queue.Queue()
+        for c in constraint_atoms:
+            put((c, frozenset([c])))
+            relevant[c] = {}
+            relevant[c][frozenset([c])] = set()
+
+        while not q.empty():
+            (c, anc) = get()
+            c_comp = self._condensation.graph["mapping"][c]
+            for r in perAtom[c]:
+                body_atoms = set([abs(x) for x in r.body if abs(x) not in projected])
+                r_idx = self.control.ground_program.objects.index(r)
+                if len(body_atoms) == 0:
+                    used = used.union(relevant[c][anc].union(set([r_idx])))
+                if len(body_atoms.intersection(anc)) == 0:
+                    for x in body_atoms:
+                        if x not in relevant:
+                            relevant[x] = {}
+                        x_comp = self._condensation.graph["mapping"][x]
+                        if x_comp == c_comp:
+                            new_anc = frozenset(anc.union(set([x])))
+                        else:
+                            new_anc = frozenset([x])
+                        if new_anc not in relevant[x]:
+                            relevant[x][new_anc] = relevant[c][anc].union(set([r_idx]))
+                            put((x, new_anc))
+                        elif len(relevant[c][anc].union(set([r_idx])).difference(relevant[x][new_anc])) > 0:
+                            relevant[x][new_anc] = relevant[x][new_anc].union(relevant[c][anc].union(set([r_idx])))
+                            put((x, new_anc))
+
+                        if x_comp != c_comp:
+                            used = used.union(relevant[x][new_anc])
+                
+        #self.print_prog([self.control.ground_program.objects[idx] for idx in set(range(len(self.control.ground_program.objects))).difference(used)])
+        self.control.ground_program.objects = [self.control.ground_program.objects[idx] for idx in used]
+            
+
+        
+
     def _computeComponents(self):
         self.dep = nx.DiGraph()
         for r in self.control.ground_program.objects:
@@ -131,6 +207,7 @@ class Application(object):
 
     def _generatePrimalGraph(self):
         self.remove_tautologies()
+        self.remove_irrelevant()
         self._graph = hypergraph.Hypergraph()
         self._program = []
         self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
@@ -158,9 +235,9 @@ class Application(object):
             self._copies[i] = {}
             self._copies[i][0] = i
 
-        for sym in self.control.symbolic_atoms:
-            if sym.literal in self._atomToVertex:
-                print(self._atomToVertex[sym.literal], sym.symbol)
+        #for sym in self.control.symbolic_atoms:
+        #    if sym.literal in self._atomToVertex:
+        #        print(self._atomToVertex[sym.literal], sym.symbol)
         #for sym in self.control.symbolic_atoms:
         #    print(sym.literal, sym.symbol)
 
@@ -266,7 +343,7 @@ class Application(object):
                 for y in comp:
                     cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
             self._len[t] = cur_max
-            print(cur_max, len(comp))
+            #print(cur_max, len(comp))
             for i in range(cur_max):
                 for a in comp:
                     if self._atomToVertex[a] in self._projected:
@@ -361,15 +438,21 @@ class Application(object):
         ts = nx.topological_sort(self._condensation)
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
-            cur_max = 0
             for x in comp:
+                self._len[x] = 0
                 for y in comp:
-                    cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
-            #cur_max = 2*len(comp)
-            self._len[t] = cur_max
-            print(cur_max, len(comp))
-            for i in range(cur_max):
-                for a in comp:
+                    self._len[x] = max(self._len[x], len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
+            #print(cur_max, len(comp))
+            #total_max = 0
+            #for x in comp:
+            #    total_max = max(total_max, self._len[x])
+            #for x in comp:
+                #if self._len[x] < total_max:
+                #    print("here")
+                #self._len[x] = total_max
+            
+            for a in comp:
+                for i in range(self._len[a]):
                     if self._atomToVertex[a] in self._projected:
                         continue
                     head = self.getAtom(a, i)
@@ -382,10 +465,10 @@ class Application(object):
                             if abs(x) in comp:
                                 if i == 0:
                                     add = False
-                                ands.append(self.getAtom(x, i - 1))
+                                ands.append(self.getAtom(x, min(i, self._len[abs(x)]) - 1))
                             else:
-                                other = self._condensation.graph["mapping"][abs(x)]
-                                ands.append(self.getAtom(x, self._len[other] - 1))
+                                #other = self._condensation.graph["mapping"][abs(x)]
+                                ands.append(self.getAtom(x, self._len[abs(x)] - 1))
                         if add:
                             ors.append(self.new_var(f"{r}.{i}"))
                             self._clauses.append([ors[-1]] + ands)
@@ -399,9 +482,9 @@ class Application(object):
             ands = []
             for x in r.body:
                 x = -x
-                other = self._condensation.graph["mapping"][abs(x)]
-                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
+                ands.append(self.getAtom(x, self._len[abs(x)] - 1))
             self._clauses.append(ands)
+
 
     # function for debugging
     def model_to_names(self):
@@ -420,8 +503,16 @@ class Application(object):
             print(":-" + ", ".join([("not " if v > 0 else "") + getName(self._vertexToAtom[abs(v)]) for v in vs]) + ".")
 
     def write_dimacs(self, stream):
-        stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
+        pc = []
         for c in self._clauses:
+            while len(c) > 10:
+                nv = self.new_var("")
+                nc = c[:9] + [nv]
+                pc.append(nc)
+                c = [-nv] + c[9:]
+            pc.append(c)
+        stream.write(f"p cnf {self._max} {len(pc)}\n".encode())
+        for c in pc:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
 
     def print_prog(self, rules):
@@ -475,6 +566,7 @@ class Application(object):
         logger.info(self.control.ground_program)
         logger.info("------------------------------------------------------------")
 
+        self._computeComponents()
         self._generatePrimalGraph()
         self._computeComponents()
         
