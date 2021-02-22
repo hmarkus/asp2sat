@@ -105,7 +105,7 @@ class Application(object):
                 if len(o.body) > 0:
                     self._program.append(o)
                     for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
-                        _atomToVertex[a] = self.new_var(str(a))
+                        _atomToVertex[a] = self.new_var("")
                         _vertexToAtom[self._max] = a
                 else:
                     if o.choice:
@@ -113,7 +113,7 @@ class Application(object):
         for o in unary:
             self._program.append(o)
             for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
-                _atomToVertex[a] = self.new_var(str(a))
+                _atomToVertex[a] = self.new_var("")
                 _vertexToAtom[self._max] = a
 
         trans_prog = set()
@@ -146,7 +146,7 @@ class Application(object):
 
     def new_var(self, name):
         self._max += 1
-        self._nameMap[self._max] = name
+        self._nameMap[self._max] = name if name != "" else str(self._max)
         return self._max
 
     def remove_tautologies(self):
@@ -417,12 +417,14 @@ class Application(object):
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
+
         for r in self._program:
             for a in r.head:
                 perAtom[a].append(r)
+
         for head in self._deriv:
             ors = []
-            for r in perAtom[a]:
+            for r in perAtom[head]:
                 ors.append(self.new_var(f"{r}"))
                 ands = [-x for x in r.body]
                 self._clauses.append([ors[-1]] + ands)
@@ -459,9 +461,10 @@ class Application(object):
 
     def print_prog(self, rules):
         def getName(v):
-            for sym in self.control.symbolic_atoms:
-                if sym.literal == v:
-                    return str(sym.symbol)
+            return self._nameMap[v]
+            #for sym in self.control.symbolic_atoms:
+            #    if sym.literal == v:
+            #        return str(sym.symbol)
         def printrule(r):
             res = ""
             res += ";".join([getName(v) for v in r.head])
