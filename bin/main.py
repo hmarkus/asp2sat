@@ -292,9 +292,10 @@ class Application(object):
             graph = tempfile.NamedTemporaryFile().name
             with FileWriter(graph) as graph_file:
                 self.write_scc(comp, graph_file)
-            p = subprocess.Popen(["clingo", "guess_tree.lp", graph], stdout=subprocess.PIPE)
+            p = subprocess.Popen(["clingo", "--time-limit=30", "guess_tree.lp", graph], stdout=subprocess.PIPE)
             p.wait()
-            #print(p.stdout.read())
+            print(p.stdout.read())
+            return eval(input())
         return comp
 
     def backdoor_process(self, comp, backdoor):
@@ -316,17 +317,18 @@ class Application(object):
             copies[a] = {}
             copies[a][len(backdoor)] = a
 
-        def getAtom(atom, i):
+        def getAtom(atom, i, bd_question):
             var = abs(atom)
             if var not in comp:
                 return atom
-            if i < 0:
+            if i < 0 or (bd_question and var in backdoor and i < 1):
                 print("this should not happen")
+                print(i)
                 exit(-1)
             if var not in copies:
                 print("this should not happen")
                 exit(-1)
-            if var in backdoor:
+            if var in backdoor and not bd_question:
                 i += 1
             if i not in copies[var]:
                 copies[var][i] = self.new_var("")
@@ -335,10 +337,10 @@ class Application(object):
 
         toAdd = set()
         for a in backdoor:
-            for i in range(len(backdoor)):
-                head = [getAtom(a, i)]
+            for i in range(1,len(backdoor)+1):
+                head = [getAtom(a, i, True)]
                 for r in ins[a]:
-                    if i == 0:
+                    if i == 1:
                         # in the first iteration we do not add rules that use atoms from the backdoor
                         add = True
                         for x in r.body:
@@ -351,15 +353,15 @@ class Application(object):
                             if abs(x) in comp:
                                 add = True
                     if add:
-                        body = [getAtom(x, i - 1) for x in r.body]
+                        body = [getAtom(x, i - 1, True) for x in r.body]
                         new_rule = Rule(head, body)
                         toAdd.add(new_rule)
-                if i > 0:
-                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
+                if i > 1:
+                    toAdd.add(Rule(head, [getAtom(a, i - 1, True)]))
 
         for a in comp.difference(backdoor):
             for i in range(len(backdoor)+1):
-                head = [getAtom(a, i)]
+                head = [getAtom(a, i, False)]
                 for r in ins[a]:
                     if i == 0:
                         # in the first iteration we only add rules that only use atoms from outside the scc
@@ -374,11 +376,11 @@ class Application(object):
                             if abs(x) in comp:
                                 add = True
                     if add:
-                        body = [getAtom(x, i - 1) for x in r.body]
+                        body = [getAtom(x, i - 1, False) for x in r.body]
                         new_rule = Rule(head, body)
                         toAdd.add(new_rule)
                 if i > 0:
-                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
+                    toAdd.add(Rule(head, [getAtom(a, i - 1, False)]))
 
         #print(toAdd)
         self._program = [r for r in self._program if r not in toRemove]
