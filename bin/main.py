@@ -167,26 +167,6 @@ class Application(object):
         self._components = list(comp)
         self._condensation = nx.algorithms.condensation(self.dep, self._components)
 
-    def write_scc(self, comp, stream):
-        for v in comp:
-            stream.write(f"p({v}).\n")
-            ancs = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
-            for vp in ancs:
-                stream.write(f"edge({vp},{v}).\n")
-
-    def compute_backdoor(self, idx):
-        comp = self._condensation.nodes[idx]["members"]
-        if len(comp) > 1:
-            #print(f"SCC {idx} of size {len(comp)}:")
-            graph = tempfile.NamedTemporaryFile().name
-            with FileWriter(graph) as graph_file:
-                self.write_scc(comp, graph_file)
-            p = subprocess.Popen(["clingo", "guess_tree.lp", graph], stdout=subprocess.PIPE)
-            p.wait()
-            print(p.stdout.read())
-            
-
-
     def treeprocess(self):
         ins = {}
         outs = {}
@@ -215,11 +195,11 @@ class Application(object):
         ancs = {}
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
-            self.compute_backdoor(t)
             for v in comp:
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
         q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
         while not len(q) == 0:
+            print("pop")
             old_v = q.pop()
             if len(ancs[old_v]) == 0:
                 continue
@@ -298,6 +278,126 @@ class Application(object):
         self._program = trans_prog
 
 
+    def write_scc(self, comp, stream):
+        for v in comp:
+            stream.write(f"p({v}).\n")
+            ancs = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
+            for vp in ancs:
+                stream.write(f"edge({vp},{v}).\n")
+
+    def compute_backdoor(self, idx):
+        comp = self._condensation.nodes[idx]["members"]
+        if len(comp) > 1:
+            #print(f"SCC {idx} of size {len(comp)}:")
+            graph = tempfile.NamedTemporaryFile().name
+            with FileWriter(graph) as graph_file:
+                self.write_scc(comp, graph_file)
+            p = subprocess.Popen(["clingo", "guess_tree.lp", graph], stdout=subprocess.PIPE)
+            p.wait()
+            #print(p.stdout.read())
+        return comp
+
+    def backdoor_process(self, comp, backdoor):
+        comp = set(comp)
+        backdoor = set(backdoor)
+
+        toRemove = set()
+        ins = {}
+        for a in comp:
+            ins[a] = set()
+        for r in self._program:
+            for a in r.head:
+                if a in comp:
+                    ins[a].add(r)
+                    toRemove.add(r)
+
+        copies = {}
+        for a in comp:
+            copies[a] = {}
+            copies[a][len(backdoor)] = a
+
+        def getAtom(atom, i):
+            var = abs(atom)
+            if var not in comp:
+                return atom
+            if i < 0:
+                print("this should not happen")
+                exit(-1)
+            if var not in copies:
+                print("this should not happen")
+                exit(-1)
+            if var in backdoor:
+                i += 1
+            if i not in copies[var]:
+                copies[var][i] = self.new_var("")
+                self._deriv.add(copies[var][i])
+            return copies[var][i] if atom > 0 else -copies[var][i]
+
+        toAdd = set()
+        for a in backdoor:
+            for i in range(len(backdoor)):
+                head = [getAtom(a, i)]
+                for r in ins[a]:
+                    if i == 0:
+                        # in the first iteration we do not add rules that use atoms from the backdoor
+                        add = True
+                        for x in r.body:
+                            if abs(x) in backdoor:
+                                add = False
+                    else:
+                        # in all but the first iteration we only use rules that use at least one atom from the SCC we are in
+                        add = False
+                        for x in r.body:
+                            if abs(x) in comp:
+                                add = True
+                    if add:
+                        body = [getAtom(x, i - 1) for x in r.body]
+                        new_rule = Rule(head, body)
+                        toAdd.add(new_rule)
+                if i > 0:
+                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
+
+        for a in comp.difference(backdoor):
+            for i in range(len(backdoor)+1):
+                head = [getAtom(a, i)]
+                for r in ins[a]:
+                    if i == 0:
+                        # in the first iteration we only add rules that only use atoms from outside the scc
+                        add = True
+                        for x in r.body:
+                            if abs(x) in comp:
+                                add = False
+                    else:
+                        # in all other iterations we only use rules that use at least one atom from the SCC we are in
+                        add = False
+                        for x in r.body:
+                            if abs(x) in comp:
+                                add = True
+                    if add:
+                        body = [getAtom(x, i - 1) for x in r.body]
+                        new_rule = Rule(head, body)
+                        toAdd.add(new_rule)
+                if i > 0:
+                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
+
+        #print(toAdd)
+        self._program = [r for r in self._program if r not in toRemove]
+        self._program += list(toAdd)
+        
+        
+    def preprocess(self):
+        self._computeComponents()
+        self.treeprocess()
+        self._computeComponents()
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            self.backdoor_process(comp, self.compute_backdoor(t))
+        self._computeComponents()
+        self.treeprocess()
+        self._computeComponents()
+        
+
     def _generatePrimalGraph(self):
         #self.remove_irrelevant()
         self._graph = hypergraph.Hypergraph()
@@ -313,75 +413,28 @@ class Application(object):
         #for sym in self.control.symbolic_atoms:
         #    print(sym.literal, sym.symbol)
 
-
-
-    def getAtom(self, atom, i):
-        var = abs(atom)
-        if var in self._guess:
-            return atom
-        if i < 0:
-            print("this should not happen")
-            exit(-1)
-        if var not in self._copies:
-            print("this should not happen")
-            exit(-1)
-        if i not in self._copies[var]:
-            self._copies[var][i] = self.new_var("")
-        return self._copies[var][i] if atom > 0 else -self._copies[var][i]
-
-    def _reduction(self):
-        for i in range(1, self._max + 1):
-            self._copies[i] = {}
-            self._copies[i][0] = i
+    def clark_completition(self):
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
         for r in self._program:
             for a in r.head:
                 perAtom[a].append(r)
-        
-        ts = nx.topological_sort(self._condensation)
-        for t in ts:
-            comp = self._condensation.nodes[t]["members"]
-            for a in comp:
-                if a in self._guess:
-                    continue
-                for i in range(len(comp)):
-                    head = self.getAtom(a, i)
-                    ors = []
-                    #print(perAtom[a])
-                    for r in perAtom[a]:
-                        add = True
-                        ands = []
-                        for x in r.body:
-                            x = -x
-                            if abs(x) in comp:
-                                if i == 0:
-                                    add = False
-                                else:
-                                    ands.append(self.getAtom(x, i - 1))
-                            else:
-                                x_comp = self._condensation.graph["mapping"][abs(x)]
-                                x_len = len(self._condensation.nodes[x_comp]["members"])
-                                ands.append(self.getAtom(x, x_len - 1))
-                        if add:
-                            ors.append(self.new_var(f"{r}.{i}"))
-                            self._clauses.append([ors[-1]] + ands)
-                            for at in ands:
-                                self._clauses.append([-ors[-1], -at])
-                    self._clauses.append([-head] + [o for o in ors])
-                    for o in ors:
-                        self._clauses.append([head, -o])
+        for head in self._deriv:
+            ors = []
+            for r in perAtom[a]:
+                ors.append(self.new_var(f"{r}"))
+                ands = [-x for x in r.body]
+                self._clauses.append([ors[-1]] + ands)
+                for at in ands:
+                    self._clauses.append([-ors[-1], -at])
+            self._clauses.append([-head] + [o for o in ors])
+            for o in ors:
+                self._clauses.append([head, -o])
 
         constraints = [r for r in self._program if len(r.head) == 0]
         for r in constraints:
-            ands = []
-            for x in r.body:
-                x = -x
-                x_comp = self._condensation.graph["mapping"][abs(x)]
-                x_len = len(self._condensation.nodes[x_comp]["members"])
-                ands.append(self.getAtom(x, x_len - 1))
-            self._clauses.append(ands)
+            self._clauses.append([-x for x in r.body])
 
 
     def kCNF(self, k):
@@ -458,14 +511,12 @@ class Application(object):
         self._normalize()
 
         #self._generatePrimalGraph()
-        self._computeComponents()
-        self.treeprocess()
+        self.preprocess()
         #cProfile.run('self.treeprocess()')
-        logger.info("   Treeprocessing Done")
+        logger.info("   Preprocessing Done")
         logger.info("------------------------------------------------------------")
-        self._computeComponents()
         
-        self._reduction()
+        self.clark_completition()
         #parser = wfParse.WeightedFormulaParser()
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
