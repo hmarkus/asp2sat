@@ -52,8 +52,7 @@ from dpdb.reader import CnfReader
 import tempfile
 
 import wfParse
-
-from pysdd.sdd import SddManager, Vtree
+import backdoor
 
 class AppConfig(object):
     """
@@ -179,18 +178,6 @@ class Application(object):
             for b in r.body:
                 if not abs(b) in self._guess:
                     outs[abs(b)].add(r)
-        #print("ins")
-        #for a in ins.keys():
-        #    for r in ins[a]:
-        #        print(r.head, end = " ")
-        #        print(r.body, end = ", ")
-        #    print()
-        #print("outs")
-        #for a in outs.keys():
-        #    for r in outs[a]:
-        #        print(r.head, end = " ")
-        #        print(r.body, end = ", ")
-        #    print()
         ts = nx.topological_sort(self._condensation)
         ancs = {}
         for t in ts:
@@ -211,8 +198,6 @@ class Application(object):
             ancs[anc].remove(old_v)
             if len(ancs[anc]) == 1:
                 q.add(anc)
-            #print(old_v)
-            #print(anc)
 
             # this contains all rules that use anc to derive v
             to_rem = ins[old_v].intersection(outs[anc])
@@ -240,11 +225,6 @@ class Application(object):
                 body = [(abs(b) if abs(b) != old_v else new_v)*(1 if b > 0 else -1) for b in r.body]
                 new_r = Rule(r.head,body)
                 for b in r.head:
-                    #print(anc)
-                    #print(old_v)
-                    #for rule in ins[b]:
-                    #    print(rule.head)
-                    #    print(rule.body)
                     ins[b].remove(r)
                     ins[b].add(new_r)
                 for b in r.body:
@@ -254,23 +234,9 @@ class Application(object):
                             outs[abs(b)].add(new_r)
                         else:
                             outs[new_v].add(new_r)
-            # TODO check if the signs are correct
             new_r = Rule([new_v], [old_v])
             ins[new_v].add(new_r)
             outs[old_v].add(new_r)
-            #print("ins")
-            #for a in ins.keys():
-            #    for r in ins[a]:
-            #        print(r.head, end = " ")
-            #        print(r.body, end = ", ")
-            #    print()
-            #print("outs")
-            #for a in outs.keys():
-            #    for r in outs[a]:
-            #        print(r.head, end = " ")
-            #        print(r.body, end = ", ")
-            #    print()
-        #print(outs)
         primitives = [r for r in self._program if set(r.body).issubset(self._guess)]
         trans_prog = primitives
         for a in outs.keys():
@@ -278,25 +244,21 @@ class Application(object):
         self._program = trans_prog
 
 
-    def write_scc(self, comp, stream):
+    def write_scc(self, comp):
+        res = ""
         for v in comp:
-            stream.write(f"p({v}).\n")
+            res += f"p({v}).\n"
             ancs = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
             for vp in ancs:
-                stream.write(f"edge({vp},{v}).\n")
+                res += f"edge({vp},{v}).\n"
+        return res
 
     def compute_backdoor(self, idx):
         comp = self._condensation.nodes[idx]["members"]
-        if len(comp) > 1:
-            #print(f"SCC {idx} of size {len(comp)}:")
-            graph = tempfile.NamedTemporaryFile().name
-            with FileWriter(graph) as graph_file:
-                self.write_scc(comp, graph_file)
-            p = subprocess.Popen(["clingo", "--time-limit=30", "guess_tree.lp", graph], stdout=subprocess.PIPE)
-            p.wait()
-            print(p.stdout.read())
-            return eval(input())
-        return comp
+        c = backdoor.ClingoControl(self.write_scc(comp))
+        res = c.get_backdoor("./guess_tree.lp")[2][0]
+        print(res)
+        return res
 
     def backdoor_process(self, comp, backdoor):
         comp = set(comp)
@@ -394,7 +356,8 @@ class Application(object):
         ts = nx.topological_sort(self._condensation)
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
-            self.backdoor_process(comp, self.compute_backdoor(t))
+            if len(comp) > 1:
+                self.backdoor_process(comp, self.compute_backdoor(t))
         self._computeComponents()
         self.treeprocess()
         self._computeComponents()
