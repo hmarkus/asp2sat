@@ -167,6 +167,26 @@ class Application(object):
         self._components = list(comp)
         self._condensation = nx.algorithms.condensation(self.dep, self._components)
 
+    def write_scc(self, comp, stream):
+        for v in comp:
+            stream.write(f"p({v}).\n")
+            ancs = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
+            for vp in ancs:
+                stream.write(f"edge({vp},{v}).\n")
+
+    def compute_backdoor(self, idx):
+        comp = self._condensation.nodes[idx]["members"]
+        if len(comp) > 1:
+            #print(f"SCC {idx} of size {len(comp)}:")
+            graph = tempfile.NamedTemporaryFile().name
+            with FileWriter(graph) as graph_file:
+                self.write_scc(comp, graph_file)
+            p = subprocess.Popen(["clingo", "guess_tree.lp", graph], stdout=subprocess.PIPE)
+            p.wait()
+            print(p.stdout.read())
+            
+
+
     def treeprocess(self):
         ins = {}
         outs = {}
@@ -195,6 +215,7 @@ class Application(object):
         ancs = {}
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
+            self.compute_backdoor(t)
             for v in comp:
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
         q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
@@ -337,7 +358,8 @@ class Application(object):
                             if abs(x) in comp:
                                 if i == 0:
                                     add = False
-                                ands.append(self.getAtom(x, i - 1))
+                                else:
+                                    ands.append(self.getAtom(x, i - 1))
                             else:
                                 x_comp = self._condensation.graph["mapping"][abs(x)]
                                 x_len = len(self._condensation.nodes[x_comp]["members"])
