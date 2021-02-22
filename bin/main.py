@@ -63,6 +63,14 @@ class AppConfig(object):
     def __init__(self):
         self.eclingo_verbose = 0
 
+class Rule(object):
+    def __init__(self, head, body):
+        self.head = head
+        self.body = body
+    #def __eq__(self, other):
+    #    return self.head == other.head and self.body == other.body
+    #def __hash__(self):
+    #    return hash(tuple(self.head)) + hash(tuple(self.body))
 
 class Application(object):
     """
@@ -76,22 +84,49 @@ class Application(object):
         self.config = AppConfig()
         # the variable counter
         self._max = 0
-        # map between variables and their name
         self._nameMap = {}
-        # store the weights of literals here
-        self._weights = {}
         # store the clauses here
         self._clauses = []
         # store the projected variables
-        self._projected = set()
-        # remember one variable for x <_t x' regardless of t
-        self._lessThan = {}
-        self._done = {}
+        self._guess = set()
+        self._deriv = set()
         self._copies = {}
-        self._sdds = {}
-        self._len = {}
-        self._clauses.append([1])
-        self.new_var("true")
+
+    def _normalize(self):
+        self.remove_tautologies()
+        self._program = []
+        _atomToVertex = {} # htd wants succinct numbering of vertices / no holes
+        _vertexToAtom = {} # inverse mapping of _atomToVertex 
+        unary = []
+        for o in self.control.ground_program.objects:
+            if isinstance(o, ClingoRule):
+                o.atoms = set(o.head)
+                o.atoms.update(tuple(map(abs, o.body)))
+                if len(o.body) > 0:
+                    self._program.append(o)
+                    for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
+                        _atomToVertex[a] = self.new_var(str(a))
+                        _vertexToAtom[self._max] = a
+                else:
+                    if o.choice:
+                        unary.append(o)
+        for o in unary:
+            self._program.append(o)
+            for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
+                _atomToVertex[a] = self.new_var(str(a))
+                _vertexToAtom[self._max] = a
+
+        trans_prog = set()
+        for r in self._program:
+            if r.choice: 
+                self._guess.add(_atomToVertex[r.head[0]])
+            else:
+                head = list(map(lambda x: _atomToVertex[x], r.head))
+                body = list(map(lambda x: _atomToVertex[abs(x)]*(1 if x > 0 else -1), r.body))
+                trans_prog.add(Rule(head,body))
+        self._program = trans_prog
+        self._deriv = set(range(1,self._max + 1)).difference(self._guess)
+
 
     def _read(self, path):
         if path == "-":
@@ -121,119 +156,135 @@ class Application(object):
                 tmp.append(o)
         self.control.ground_program.objects = tmp
 
-    def remove_irrelevant(self):
-        used = set()
-        projected = set()
-        atoms = set()
-        constraints = []
-        constraint_atoms = set()
-        for r in self.control.ground_program.objects:
-            r_idx = self.control.ground_program.objects.index(r)
-            if r.choice: 
-                projected.add(r.head[0])
-                used.add(r_idx)
-            elif len(r.head) > 0 and len(r.body) > 0:
-                atoms.add(r.head[0])
-            else:
-                used.add(r_idx)
-                constraints.append(r)
-                constraint_atoms = constraint_atoms.union(set([abs(x) for x in r.body]))
-        perAtom = {}
-        for a in atoms:
-            perAtom[a] = [r for r in self.control.ground_program.objects if len(r.head) > 0 and r.head[0] == a]
-        relevant = {}
-
-        in_q = set()
-        def put(t):
-            if t not in in_q:
-                in_q.add(t)
-                q.put(t)
-        
-        def get():
-            res = q.get()
-            in_q.remove(res)
-            return res
-
-        q = queue.Queue()
-        for c in constraint_atoms:
-            put((c, frozenset([c])))
-            relevant[c] = {}
-            relevant[c][frozenset([c])] = set()
-
-        while not q.empty():
-            (c, anc) = get()
-            c_comp = self._condensation.graph["mapping"][c]
-            for r in perAtom[c]:
-                body_atoms = set([abs(x) for x in r.body if abs(x) not in projected])
-                r_idx = self.control.ground_program.objects.index(r)
-                if len(body_atoms) == 0:
-                    used = used.union(relevant[c][anc].union(set([r_idx])))
-                if len(body_atoms.intersection(anc)) == 0:
-                    for x in body_atoms:
-                        if x not in relevant:
-                            relevant[x] = {}
-                        x_comp = self._condensation.graph["mapping"][x]
-                        if x_comp == c_comp:
-                            new_anc = frozenset(anc.union(set([x])))
-                        else:
-                            new_anc = frozenset([x])
-                        if new_anc not in relevant[x]:
-                            relevant[x][new_anc] = relevant[c][anc].union(set([r_idx]))
-                            put((x, new_anc))
-                        elif len(relevant[c][anc].union(set([r_idx])).difference(relevant[x][new_anc])) > 0:
-                            relevant[x][new_anc] = relevant[x][new_anc].union(relevant[c][anc].union(set([r_idx])))
-                            put((x, new_anc))
-
-                        if x_comp != c_comp:
-                            used = used.union(relevant[x][new_anc])
-                
-        #self.print_prog([self.control.ground_program.objects[idx] for idx in set(range(len(self.control.ground_program.objects))).difference(used)])
-        self.control.ground_program.objects = [self.control.ground_program.objects[idx] for idx in used]
-            
-
-        
-
     def _computeComponents(self):
         self.dep = nx.DiGraph()
-        for r in self.control.ground_program.objects:
-            if isinstance(r, ClingoRule):
-                for a in r.head:
-                    for b in r.body:
-                        if b > 0:
-                            self.dep.add_edge(b, a)
+        for r in self._program:
+            for a in r.head:
+                for b in r.body:
+                    if b > 0:
+                        self.dep.add_edge(b, a)
         comp = nx.algorithms.strongly_connected_components(self.dep)
         self._components = list(comp)
         self._condensation = nx.algorithms.condensation(self.dep, self._components)
 
-    def _generatePrimalGraph(self):
-        self.remove_tautologies()
-        self.remove_irrelevant()
-        self._graph = hypergraph.Hypergraph()
-        self._program = []
-        self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
-        self._vertexToAtom = {} # inverse mapping of _atomToVertex 
-        unary = []
-        for o in self.control.ground_program.objects:
-            if isinstance(o, ClingoRule):
-                o.atoms = set(o.head)
-                o.atoms.update(tuple(map(abs, o.body)))
-                self._program.append(o)
-                if len(o.atoms) > 1:
-                    for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                        self._atomToVertex[a] = self.new_var(str(a))
-                        self._vertexToAtom[self._max] = a
-                    self._graph.add_hyperedge(tuple(map(lambda x: self._atomToVertex[x], o.atoms)))
-                else:
-                    if o.choice:
-                        unary.append(o)
-        for o in unary:
-            for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                self._atomToVertex[a] = self.new_var(str(a))
-                self._vertexToAtom[self._max] = a
+    def treeprocess(self):
+        ins = {}
+        outs = {}
+        for a in self._deriv:
+            ins[a] = set()
+            outs[a] = set()
+        for r in self._program:
+            for a in r.head:
+                ins[a].add(r)
+            for b in r.body:
+                if not abs(b) in self._guess:
+                    outs[abs(b)].add(r)
+        #print("ins")
+        #for a in ins.keys():
+        #    for r in ins[a]:
+        #        print(r.head, end = " ")
+        #        print(r.body, end = ", ")
+        #    print()
+        #print("outs")
+        #for a in outs.keys():
+        #    for r in outs[a]:
+        #        print(r.head, end = " ")
+        #        print(r.body, end = ", ")
+        #    print()
+        ts = nx.topological_sort(self._condensation)
+        ancs = {}
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            for v in comp:
+                ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
+        q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
+        while not len(q) == 0:
+            old_v = q.pop()
+            if len(ancs[old_v]) == 0:
+                continue
+            new_v = self.new_var("")
+            self._deriv.add(new_v)
+            ins[new_v] = set()
+            outs[new_v] = set()
+            anc = ancs[old_v].pop()
+            ancs[anc].remove(old_v)
+            if len(ancs[anc]) == 1:
+                q.add(anc)
+            #print(old_v)
+            #print(anc)
 
-        for i in range(2, self._max + 1):
-            self._copies[i] = {}
-            self._copies[i][0] = i
+            # this contains all rules that use anc to derive v
+            to_rem = ins[old_v].intersection(outs[anc])
+            # this contains all rules that do not use anc to derive v
+            # we just keep them as they are
+            ins[old_v] = ins[old_v].difference(to_rem)
+            #outs[anc] = outs[anc].difference(to_rem)
+            # any rule that uses anc to derive v can now only derive new_v
+            for r in to_rem:
+                head = [b if b != old_v else new_v for b in r.head]
+                new_r = Rule(head,r.body)
+                ins[new_v].add(new_r)
+                for b in r.body:
+                    if abs(b) not in self._guess:
+                        outs[abs(b)].remove(r)
+                        outs[abs(b)].add(new_r)
+
+            # this contains all rules that use v and do not derive anc
+            to_rem = outs[old_v].difference(ins[anc])
+            # this contains all rules that use v to derive anc
+            # we just keep them as they are
+            outs[old_v] = outs[old_v].difference(to_rem)
+            # any rule that uses v to derive something other than anc must use new_v
+            for r in to_rem:
+                body = [(abs(b) if abs(b) != old_v else new_v)*(1 if b > 0 else -1) for b in r.body]
+                new_r = Rule(r.head,body)
+                for b in r.head:
+                    #print(anc)
+                    #print(old_v)
+                    #for rule in ins[b]:
+                    #    print(rule.head)
+                    #    print(rule.body)
+                    ins[b].remove(r)
+                    ins[b].add(new_r)
+                for b in r.body:
+                    if abs(b) not in self._guess:
+                        if abs(b) != old_v:
+                            outs[abs(b)].remove(r)
+                            outs[abs(b)].add(new_r)
+                        else:
+                            outs[new_v].add(new_r)
+            # TODO check if the signs are correct
+            new_r = Rule([new_v], [old_v])
+            ins[new_v].add(new_r)
+            outs[old_v].add(new_r)
+            #print("ins")
+            #for a in ins.keys():
+            #    for r in ins[a]:
+            #        print(r.head, end = " ")
+            #        print(r.body, end = ", ")
+            #    print()
+            #print("outs")
+            #for a in outs.keys():
+            #    for r in outs[a]:
+            #        print(r.head, end = " ")
+            #        print(r.body, end = ", ")
+            #    print()
+        #print(outs)
+        primitives = [r for r in self._program if set(r.body).issubset(self._guess)]
+        trans_prog = primitives
+        for a in outs.keys():
+            trans_prog = trans_prog + list(outs[a])
+        self._program = trans_prog
+
+
+    def _generatePrimalGraph(self):
+        #self.remove_irrelevant()
+        self._graph = hypergraph.Hypergraph()
+        for r in self._program:
+            atoms = set(r.head)
+            atoms.update(tuple(map(abs, r.body)))
+            self._graph.add_hyperedge(tuple(atoms))
+
 
         #for sym in self.control.symbolic_atoms:
         #    if sym.literal in self._atomToVertex:
@@ -242,222 +293,43 @@ class Application(object):
         #    print(sym.literal, sym.symbol)
 
 
-    # write a single clause
-    # connective == 0 -> and, == 1 -> or, == 2 -> impl, == 3 -> iff, == 4 -> *, == 5 -> +
-    def clause_writer(self, p, c1 = 0, c2 = 0, connective = 0):
-        if c1 == 0:
-            c1 = self.new_var(f"{p}'sc[0]")
-        if c2 == 0:
-            c2 = self.new_var(f"{p}'sc[1]")
-        if connective == 0:
-            self._clauses.append([-p, c1])
-            self._clauses.append([-p, c2])
-            self._clauses.append([p, -c1, -c2])
-        if connective == 1:
-            self._clauses.append([p, -c1])
-            self._clauses.append([p, -c2])
-            self._clauses.append([-p, c1, c2])
-        if connective == 2:
-            self._clauses.append([p, c1])
-            self._clauses.append([p, -c2])
-            self._clauses.append([-p, -c1, c2])
-        if connective == 3:
-            c = self.clause_writer(p, c1 = self.new_var(f"{c1}->{c2}"), c2 = self.new_var(f"{c2}->{c1}"))
-            self.clause_writer(c[0], c1 = c1, c2 = c2, connective = 2)
-            self.clause_writer(c[1], c1 = c2, c2 = c1, connective = 2)
-        if connective == 4:
-            self._clauses.append([-p, c1])
-            self._clauses.append([-p, c2])
-            self._clauses.append([p, -c1])
-            self._clauses.append([p, -c2])
-        if connective == 5:
-            self._clauses.append([p, -c1])
-            self._clauses.append([p, -c2])
-            self._clauses.append([-p, c1, c2])
-            self._clauses.append([-p, -c1, -c2])
-        return (c1, c2)
 
     def getAtom(self, atom, i):
-        var = self._atomToVertex[abs(atom)]
-        if var in self._projected:
-            return var if atom > 0 else -var
+        var = abs(atom)
+        if var in self._guess:
+            return atom
         if i < 0:
-            return -1 if atom > 0 else 1
+            print("this should not happen")
+            exit(-1)
         if var not in self._copies:
-            self._copies[var] = {}
+            print("this should not happen")
+            exit(-1)
         if i not in self._copies[var]:
             self._copies[var][i] = self.new_var("")
         return self._copies[var][i] if atom > 0 else -self._copies[var][i]
 
-    def getSDD(self, atom, i, manager):
-        var = self._atomToVertex[abs(atom)]
-        if var in self._projected:
-            return manager.literal((self._projectedList.index(var) + 1) * (1 if atom > 0 else -1))
-        if i < 0:
-            return manager.false() if atom > 0 else manager.true()
-        if var not in self._sdds or i not in self._sdds[var]:
-            print("This should not happen!")
-            return None
-        if atom < 0:
-            print("This should not happen!")
-            return None
-        return self._sdds[var][i]
-
-    def setSDD(self, atom, i, sdd):
-        var = self._atomToVertex[abs(atom)]
-        if var not in self._sdds:
-            self._sdds[var] = {}
-        if i in self._sdds[var]:
-            print("This should not happen!")
-        self._sdds[var][i] = sdd
-        sdd.ref()
-
-    def deref(self, comp, i):
-        for atom in comp:
-            var = self._atomToVertex[abs(atom)]
-            self._sdds[var][i].deref()
-
-    def _buildSDD(self):
-        #take care of the rules
-        for r in self._program:
-            if r.choice: 
-                self._projected.add(self._atomToVertex[r.head[0]])
-            elif len(r.head) > 0:
-                self._atoms.add(r.head[0])
-            else:
-                self._constraints.append(r)
-        self._perAtom = {}
-        for a in self._atoms:
-            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
-
-        self._projectedList = list(self._projected)
-
-        vtree = Vtree(var_count=len(self._projected), vtree_type="balanced".encode())
-        manager = SddManager(auto_gc_and_minimize=True, vtree=vtree)
-
-        ts = nx.topological_sort(self._condensation)
-        for t in ts:
-            comp = self._condensation.nodes[t]["members"]
-            cur_max = 0
-            for x in comp:
-                for y in comp:
-                    cur_max = max(cur_max, len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
-            self._len[t] = cur_max
-            #print(cur_max, len(comp))
-            for i in range(cur_max):
-                for a in comp:
-                    if self._atomToVertex[a] in self._projected:
-                        continue
-                    ors = []
-                    for r in self._perAtom[a]:
-                        ands = []
-                        for x in r.body:
-                            if abs(x) in comp:
-                                ands.append(self.getSDD(x, i - 1, manager))
-                            else:
-                                other = self._condensation.graph["mapping"][abs(x)]
-                                ands.append(self.getSDD(x, self._len[other] - 1, manager))
-                        body = manager.true()
-                        for node in ands:
-                            body = manager.conjoin(body, node)
-                        if body != None:
-                            ors.append(body)
-                    head = manager.false()
-                    for node in ors:
-                        head = manager.disjoin(head, node)
-                    if head != None:
-                        self.setSDD(a, i, head)
-                    else:
-                        print("this should not happen!")
-                if i > 0:
-                    self.deref(comp, i - 1)
-
-
-
-    def _breakCycles(self, stream):
-        #take care of the rules
-        self._atoms = set()
-        self._constraints = []
-        for r in self._program:
-            if r.choice: 
-                self._projected.add(self._atomToVertex[r.head[0]])
-            elif len(r.head) > 0:
-                self._atoms.add(r.head[0])
-            else:
-                self._constraints.append(r)
-        self._perAtom = {}
-        for a in self._atoms:
-            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
-        
-        ts = nx.topological_sort(self._condensation)
-        for t in ts:
-            comp = self._condensation.nodes[t]["members"]
-            for i in range(len(comp)):
-                for a in comp:
-                    if self._atomToVertex[a] in self._projected:
-                        continue
-                    head = self.getAtom(a, i)
-                    for r in self._perAtom[a]:
-                        ands = []
-                        for x in r.body:
-                            if abs(x) in comp:
-                                ands.append(self.getAtom(x, i - 1))
-                            else:
-                                other = self._condensation.graph["mapping"][abs(x)]
-                                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
-                        body = ",".join([f"p({x})" for x in ands])
-                        stream.write((f"p({head}):-{body}.\n").encode())
-
-        for a in self._projected:
-            stream.write((f"0.5::p({a}).\n").encode())
-
-        for r in self._constraints:
-            ands = []
-            for x in r.body:
-                other = self._condensation.graph["mapping"][abs(x)]
-                ands.append(self.getAtom(x, len(self._condensation.nodes[other]["members"]) - 1))
-            body = ",".join([f"p({x})" for x in ands])
-            stream.write((f"query({body}).\n").encode())
-
-
     def _reduction(self):
-        #take care of the rules
-        self._atoms = set()
-        self._constraints = []
+        for i in range(1, self._max + 1):
+            self._copies[i] = {}
+            self._copies[i][0] = i
+        perAtom = {}
+        for a in self._deriv:
+            perAtom[a] = []
         for r in self._program:
-            if r.choice: 
-                self._projected.add(self._atomToVertex[r.head[0]])
-            elif len(r.head) > 0:
-                self._atoms.add(r.head[0])
-            else:
-                self._constraints.append(r)
-        self._perAtom = {}
-        for a in self._atoms:
-            self._perAtom[a] = [r for r in self._program if len(r.head) > 0 and r.head[0] == a]
+            for a in r.head:
+                perAtom[a].append(r)
         
         ts = nx.topological_sort(self._condensation)
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
-            for x in comp:
-                self._len[x] = 0
-                for y in comp:
-                    self._len[x] = max(self._len[x], len(max(nx.all_simple_paths(self.dep, x, y), key = len, default = [1])))
-            #print(cur_max, len(comp))
-            #total_max = 0
-            #for x in comp:
-            #    total_max = max(total_max, self._len[x])
-            #for x in comp:
-                #if self._len[x] < total_max:
-                #    print("here")
-                #self._len[x] = total_max
-            
             for a in comp:
-                for i in range(self._len[a]):
-                    if self._atomToVertex[a] in self._projected:
-                        continue
+                if a in self._guess:
+                    continue
+                for i in range(len(comp)):
                     head = self.getAtom(a, i)
                     ors = []
-                    for r in self._perAtom[a]:
+                    #print(perAtom[a])
+                    for r in perAtom[a]:
                         add = True
                         ands = []
                         for x in r.body:
@@ -465,10 +337,11 @@ class Application(object):
                             if abs(x) in comp:
                                 if i == 0:
                                     add = False
-                                ands.append(self.getAtom(x, min(i, self._len[abs(x)]) - 1))
+                                ands.append(self.getAtom(x, i - 1))
                             else:
-                                #other = self._condensation.graph["mapping"][abs(x)]
-                                ands.append(self.getAtom(x, self._len[abs(x)] - 1))
+                                x_comp = self._condensation.graph["mapping"][abs(x)]
+                                x_len = len(self._condensation.nodes[x_comp]["members"])
+                                ands.append(self.getAtom(x, x_len - 1))
                         if add:
                             ors.append(self.new_var(f"{r}.{i}"))
                             self._clauses.append([ors[-1]] + ands)
@@ -478,41 +351,35 @@ class Application(object):
                     for o in ors:
                         self._clauses.append([head, -o])
 
-        for r in self._constraints:
+        constraints = [r for r in self._program if len(r.head) == 0]
+        for r in constraints:
             ands = []
             for x in r.body:
                 x = -x
-                ands.append(self.getAtom(x, self._len[abs(x)] - 1))
+                x_comp = self._condensation.graph["mapping"][abs(x)]
+                x_len = len(self._condensation.nodes[x_comp]["members"])
+                ands.append(self.getAtom(x, x_len - 1))
             self._clauses.append(ands)
 
 
-    # function for debugging
-    def model_to_names(self):
-        f = open("model.out")
-        f.readline()
-        for i in range(668):
-            vs = [int(x) for x in f.readline().split() if abs(int(x)) < 25 and int(x) != 0]
-            def getName(v):
-                for sym in self.control.symbolic_atoms:
-                    if sym.literal == v:
-                        return str(sym.symbol)
-            #with open("out.cnf", "a") as file_out:
-            #    file_out.write(" ".join([str(-v) for v in vs]) + " 0\n")
-            #for v in vs:
-            #    print(("-" if v < 0 else "")+getName(self._vertexToAtom[abs(v)]))
-            print(":-" + ", ".join([("not " if v > 0 else "") + getName(self._vertexToAtom[abs(v)]) for v in vs]) + ".")
-
-    def write_dimacs(self, stream):
+    def kCNF(self, k):
+        if k <= 2:
+            print("We can only get kCNF for k >= 3")
+            exit(-1)
         pc = []
         for c in self._clauses:
-            while len(c) > 10:
+            while len(c) > k:
                 nv = self.new_var("")
-                nc = c[:9] + [nv]
+                nc = c[:k-1] + [nv]
                 pc.append(nc)
-                c = [-nv] + c[9:]
+                c = [-nv] + c[k-1:]
             pc.append(c)
-        stream.write(f"p cnf {self._max} {len(pc)}\n".encode())
-        for c in pc:
+        self._clauses = pc
+
+
+    def write_dimacs(self, stream):
+        stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
+        for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
 
     def print_prog(self, rules):
@@ -566,8 +433,14 @@ class Application(object):
         logger.info(self.control.ground_program)
         logger.info("------------------------------------------------------------")
 
+        self._normalize()
+
+        #self._generatePrimalGraph()
         self._computeComponents()
-        self._generatePrimalGraph()
+        self.treeprocess()
+        #cProfile.run('self.treeprocess()')
+        logger.info("   Treeprocessing Done")
+        logger.info("------------------------------------------------------------")
         self._computeComponents()
         
         self._reduction()
@@ -575,6 +448,7 @@ class Application(object):
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
         #parser.parse(wf, semantics = sem)
+        #self.kCNF(10)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
         self.encoding_stats()
