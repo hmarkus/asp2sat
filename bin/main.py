@@ -186,7 +186,6 @@ class Application(object):
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
         q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
         while not len(q) == 0:
-            print("pop")
             old_v = q.pop()
             if len(ancs[old_v]) == 0:
                 continue
@@ -257,7 +256,6 @@ class Application(object):
         comp = self._condensation.nodes[idx]["members"]
         c = backdoor.ClingoControl(self.write_scc(comp))
         res = c.get_backdoor("./guess_tree.lp")[2][0]
-        print(res)
         return res
 
     def backdoor_process(self, comp, backdoor):
@@ -279,19 +277,16 @@ class Application(object):
             copies[a] = {}
             copies[a][len(backdoor)] = a
 
-        def getAtom(atom, i, bd_question):
+        def getAtom(atom, i):
             var = abs(atom)
             if var not in comp:
                 return atom
-            if i < 0 or (bd_question and var in backdoor and i < 1):
+            if i < 0:
                 print("this should not happen")
-                print(i)
                 exit(-1)
             if var not in copies:
                 print("this should not happen")
                 exit(-1)
-            if var in backdoor and not bd_question:
-                i += 1
             if i not in copies[var]:
                 copies[var][i] = self.new_var("")
                 self._deriv.add(copies[var][i])
@@ -300,7 +295,7 @@ class Application(object):
         toAdd = set()
         for a in backdoor:
             for i in range(1,len(backdoor)+1):
-                head = [getAtom(a, i, True)]
+                head = [getAtom(a, i)]
                 for r in ins[a]:
                     if i == 1:
                         # in the first iteration we do not add rules that use atoms from the backdoor
@@ -315,21 +310,21 @@ class Application(object):
                             if abs(x) in comp:
                                 add = True
                     if add:
-                        body = [getAtom(x, i - 1, True) for x in r.body]
+                        body = [getAtom(x, i - 1) for x in r.body]
                         new_rule = Rule(head, body)
                         toAdd.add(new_rule)
                 if i > 1:
-                    toAdd.add(Rule(head, [getAtom(a, i - 1, True)]))
+                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
 
         for a in comp.difference(backdoor):
             for i in range(len(backdoor)+1):
-                head = [getAtom(a, i, False)]
+                head = [getAtom(a, i)]
                 for r in ins[a]:
                     if i == 0:
-                        # in the first iteration we only add rules that only use atoms from outside the scc
+                        # in the first iteration we only add rules that only use atoms from outside 
                         add = True
                         for x in r.body:
-                            if abs(x) in comp:
+                            if abs(x) in backdoor:
                                 add = False
                     else:
                         # in all other iterations we only use rules that use at least one atom from the SCC we are in
@@ -338,11 +333,11 @@ class Application(object):
                             if abs(x) in comp:
                                 add = True
                     if add:
-                        body = [getAtom(x, i - 1, False) for x in r.body]
+                        body = [getAtom(x, i) for x in r.body]
                         new_rule = Rule(head, body)
                         toAdd.add(new_rule)
                 if i > 0:
-                    toAdd.add(Rule(head, [getAtom(a, i - 1, False)]))
+                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
 
         #print(toAdd)
         self._program = [r for r in self._program if r not in toRemove]
@@ -414,6 +409,8 @@ class Application(object):
                 nv = self.new_var("")
                 nc = c[:k-1] + [nv]
                 pc.append(nc)
+                for i in range(k-1):
+                    pc.append([-c[i], -nv])
                 c = [-nv] + c[k-1:]
             pc.append(c)
         self._clauses = pc
@@ -485,6 +482,7 @@ class Application(object):
         logger.info("------------------------------------------------------------")
         
         self.clark_completition()
+        #self.kCNF(3)
         #parser = wfParse.WeightedFormulaParser()
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
