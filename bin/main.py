@@ -255,13 +255,16 @@ class Application(object):
     def compute_backdoor(self, idx):
         comp = self._condensation.nodes[idx]["members"]
         local_dep = self.dep.subgraph(comp)
-        nx.draw(local_dep)
-        plt.show()
-        #basis = nx.cycle_basis(local_dep.to_undirected())
-        #c = backdoor.ClingoControl(comp, basis)
-        #res = c.get_backdoor("./guess_backdoor.lp")[2][0]
-        c = backdoor.ClingoControl(comp, nx.simple_cycles(local_dep))
-        res = c.get_backdoor("./guess_backdoor.lp")[2][0]
+        basis = nx.cycle_basis(local_dep.to_undirected())
+        res = []
+        while len(basis) > 0:
+            nx.draw(local_dep)
+            plt.show()
+            c = backdoor.ClingoControl(comp, basis)
+        #c = backdoor.ClingoControl(comp, nx.simple_cycles(local_dep))
+            res += c.get_backdoor("./guess_backdoor.lp")[2][0]
+            local_dep = self.dep.subgraph([x for x in comp if x not in res])
+            basis = nx.cycle_basis(local_dep.to_undirected())
         print(res)
         return res
 
