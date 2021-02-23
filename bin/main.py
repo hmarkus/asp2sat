@@ -256,6 +256,10 @@ class Application(object):
         comp = self._condensation.nodes[idx]["members"]
         c = backdoor.ClingoControl(self.write_scc(comp))
         res = c.get_backdoor("./guess_tree.lp")[2][0]
+        #print(res)
+        #local_dep = self.dep.subgraph(comp)
+        #nx.draw(local_dep)
+        #plt.show()
         return res
 
     def backdoor_process(self, comp, backdoor):
@@ -356,6 +360,12 @@ class Application(object):
         self._computeComponents()
         self.treeprocess()
         self._computeComponents()
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            if len(comp) > 1:
+                print("this should not happen")
+                exit(-1)
         
 
     def _generatePrimalGraph(self):
