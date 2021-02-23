@@ -254,8 +254,15 @@ class Application(object):
 
     def compute_backdoor(self, idx):
         comp = self._condensation.nodes[idx]["members"]
-        c = backdoor.ClingoControl(self.write_scc(comp))
-        res = c.get_backdoor("./guess_tree.lp")[2][0]
+        local_dep = self.dep.subgraph(comp)
+        nx.draw(local_dep)
+        plt.show()
+        #basis = nx.cycle_basis(local_dep.to_undirected())
+        #c = backdoor.ClingoControl(comp, basis)
+        #res = c.get_backdoor("./guess_backdoor.lp")[2][0]
+        c = backdoor.ClingoControl(comp, nx.simple_cycles(local_dep))
+        res = c.get_backdoor("./guess_backdoor.lp")[2][0]
+        print(res)
         return res
 
     def backdoor_process(self, comp, backdoor):
@@ -356,6 +363,14 @@ class Application(object):
         self._computeComponents()
         self.treeprocess()
         self._computeComponents()
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            if len(comp) > 1:
+                print("this should not happen")
+                exit(-1)
+
+
         
 
     def _generatePrimalGraph(self):

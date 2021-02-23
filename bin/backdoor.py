@@ -14,8 +14,13 @@ def safe_int(string):
         return string
 
 class ClingoControl:
-    def __init__(self, prog):
-        self.prog = prog
+    def __init__(self, nodes, cycles):
+        self.prog = "\n".join([f"p({v})." for v in nodes]) + "\n"
+        for c in cycles:
+            if len(c) == 2: 
+                continue
+            #print(c)
+            self.prog += ":-" + ", ".join([f"not abs({v})" for v in c]) + ".\n"
         self.grounded = False
         self.timeout = False
 
