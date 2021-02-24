@@ -191,15 +191,14 @@ class Application(object):
     def treeprocess(self):
         ins = {}
         outs = {}
-        for a in self._deriv:
+        for a in self._deriv.union(self._guess):
             ins[a] = set()
             outs[a] = set()
         for r in self._program:
             for a in r.head:
                 ins[a].add(r)
             for b in r.body:
-                if not abs(b) in self._guess:
-                    outs[abs(b)].add(r)
+                outs[abs(b)].add(r)
         ts = nx.topological_sort(self._condensation)
         ancs = {}
         for t in ts:
@@ -220,28 +219,26 @@ class Application(object):
             if len(ancs[anc]) == 1:
                 q.add(anc)
 
-            # this contains all rules that use anc to derive v
-            to_rem = ins[old_v].intersection(outs[anc])
             # this contains all rules that do not use anc to derive v
+            to_rem = ins[old_v].difference(outs[anc])
+            # this contains all rules that use anc to derive v
             # we just keep them as they are
-            ins[old_v] = ins[old_v].difference(to_rem)
-            #outs[anc] = outs[anc].difference(to_rem)
-            # any rule that uses anc to derive v can now only derive new_v
+            ins[old_v] = ins[old_v].intersection(outs[anc])
+            # any rule that does not use anc to derive v can now only derive new_v
             for r in to_rem:
                 head = [b if b != old_v else new_v for b in r.head]
                 new_r = Rule(head,r.body)
                 ins[new_v].add(new_r)
                 for b in r.body:
-                    if abs(b) not in self._guess:
-                        outs[abs(b)].remove(r)
-                        outs[abs(b)].add(new_r)
+                    outs[abs(b)].remove(r)
+                    outs[abs(b)].add(new_r)
 
+            # this contains all rules that use v and derive anc
+            to_rem = outs[old_v].intersection(ins[anc])
             # this contains all rules that use v and do not derive anc
-            to_rem = outs[old_v].difference(ins[anc])
-            # this contains all rules that use v to derive anc
             # we just keep them as they are
-            outs[old_v] = outs[old_v].difference(to_rem)
-            # any rule that uses v to derive something other than anc must use new_v
+            outs[old_v] = outs[old_v].difference(ins[anc])
+            # any rule that uses v to derive anc must use new_v
             for r in to_rem:
                 body = [(abs(b) if abs(b) != old_v else new_v)*(1 if b > 0 else -1) for b in r.body]
                 new_r = Rule(r.head,body)
@@ -249,19 +246,19 @@ class Application(object):
                     ins[b].remove(r)
                     ins[b].add(new_r)
                 for b in r.body:
-                    if abs(b) not in self._guess:
-                        if abs(b) != old_v:
-                            outs[abs(b)].remove(r)
-                            outs[abs(b)].add(new_r)
-                        else:
-                            outs[new_v].add(new_r)
-            new_r = Rule([new_v], [old_v])
-            ins[new_v].add(new_r)
-            outs[old_v].add(new_r)
-        primitives = [r for r in self._program if set(r.body).issubset(self._guess)]
-        trans_prog = primitives
-        for a in outs.keys():
-            trans_prog = trans_prog + list(outs[a])
+                    if abs(b) != old_v:
+                        outs[abs(b)].remove(r)
+                        outs[abs(b)].add(new_r)
+                    else:
+                        outs[new_v].add(new_r)
+            new_r = Rule([old_v], [new_v])
+            ins[old_v].add(new_r)
+            outs[new_v].add(new_r)
+        #primitives = [r for r in self._program if set(r.body).issubset(self._guess)]
+        constraints = [r for r in self._program if len(r.head) == 0]
+        trans_prog = constraints#primitives
+        for a in ins.keys():
+            trans_prog = trans_prog + list(ins[a])
         self._program = trans_prog
 
 
@@ -465,6 +462,8 @@ class Application(object):
             result += ":-"
             result += ",".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in r.body])
             result += ".\n"
+        if problog:
+            result += "query(smokes(X))."
         return result
 
     def write_prog(self, stream):
