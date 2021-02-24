@@ -186,6 +186,7 @@ class Application(object):
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
         q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
         while not len(q) == 0:
+            print("pop")
             old_v = q.pop()
             if len(ancs[old_v]) == 0:
                 continue
@@ -258,8 +259,8 @@ class Application(object):
         basis = nx.cycle_basis(local_dep.to_undirected())
         res = []
         while len(basis) > 0:
-            nx.draw(local_dep)
-            plt.show()
+            #nx.draw(local_dep)
+            #plt.show()
             c = backdoor.ClingoControl(comp, basis)
         #c = backdoor.ClingoControl(comp, nx.simple_cycles(local_dep))
             res += c.get_backdoor("./guess_backdoor.lp")[2][0]
