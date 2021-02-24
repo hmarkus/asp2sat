@@ -66,10 +66,6 @@ class Rule(object):
     def __init__(self, head, body):
         self.head = head
         self.body = body
-    #def __eq__(self, other):
-    #    return self.head == other.head and self.body == other.body
-    #def __hash__(self):
-    #    return hash(tuple(self.head)) + hash(tuple(self.body))
 
 class Application(object):
     """
@@ -97,6 +93,10 @@ class Application(object):
         _atomToVertex = {} # htd wants succinct numbering of vertices / no holes
         _vertexToAtom = {} # inverse mapping of _atomToVertex 
         unary = []
+
+        symbol_map = {}
+        for sym in self.control.symbolic_atoms:
+            symbol_map[sym.literal] = str(sym.symbol)
         for o in self.control.ground_program.objects:
             if isinstance(o, ClingoRule):
                 o.atoms = set(o.head)
@@ -104,7 +104,7 @@ class Application(object):
                 if len(o.body) > 0:
                     self._program.append(o)
                     for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
-                        _atomToVertex[a] = self.new_var("")
+                        _atomToVertex[a] = self.new_var(symbol_map[a])
                         _vertexToAtom[self._max] = a
                 else:
                     if o.choice:
@@ -112,7 +112,7 @@ class Application(object):
         for o in unary:
             self._program.append(o)
             for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
-                _atomToVertex[a] = self.new_var("")
+                _atomToVertex[a] = self.new_var(symbol_map[a])
                 _vertexToAtom[self._max] = a
 
         trans_prog = set()
@@ -147,6 +147,28 @@ class Application(object):
         self._max += 1
         self._nameMap[self._max] = name if name != "" else str(self._max)
         return self._max
+
+    def copy_var(self, var):
+        if "(" in self._nameMap[var]:
+            idx = self._nameMap[var].index("(")
+            inputs = self._nameMap[var][idx:]
+        else:
+            inputs = ""
+        if "_copy_" in self._nameMap[var]:
+            idx = self._nameMap[var].index("_copy_")
+            pred = self._nameMap[var][:idx]
+        else:
+            pred = self._nameMap[var]
+            if "(" in pred:
+                idx = pred.index("(")
+                pred = pred[:idx]
+            if pred+inputs not in self._copies:
+                self._copies[pred+inputs] = [var]
+        cnt = len(self._copies[pred+inputs])
+        name = pred + "_copy_" + str(cnt) + inputs
+        nv = self.new_var(name)
+        self._copies[pred+inputs].append(nv)
+        return nv
 
     def remove_tautologies(self):
         tmp = []
@@ -189,7 +211,7 @@ class Application(object):
             old_v = q.pop()
             if len(ancs[old_v]) == 0:
                 continue
-            new_v = self.new_var("")
+            new_v = self.copy_var(old_v)
             self._deriv.add(new_v)
             ins[new_v] = set()
             outs[new_v] = set()
@@ -292,7 +314,7 @@ class Application(object):
                 print("this should not happen")
                 exit(-1)
             if i not in copies[var]:
-                copies[var][i] = self.new_var("")
+                copies[var][i] = self.copy_var(var)
                 self._deriv.add(copies[var][i])
             return copies[var][i] if atom > 0 else -copies[var][i]
 
@@ -431,21 +453,23 @@ class Application(object):
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
 
-    def print_prog(self, rules):
-        def getName(v):
-            return self._nameMap[v]
-            #for sym in self.control.symbolic_atoms:
-            #    if sym.literal == v:
-            #        return str(sym.symbol)
-        def printrule(r):
-            res = ""
-            res += ";".join([getName(v) for v in r.head])
-            res += ":-"
-            res += ",".join([("not " if v < 0 else "") + getName(abs(v)) for v in r.body])
-            return res
-        for r in rules:
-            print(printrule(r))
-                
+    def prog_string(self, problog=False):
+        result = ""
+        for v in self._guess:
+            if problog:
+                result += f"0.5::{self._nameMap[v]}.\n"
+            else:
+                result += f"{{{self._nameMap[v]}}}.\n"
+        for r in self._program:
+            result += ";".join([self._nameMap[v] for v in r.head])
+            result += ":-"
+            result += ",".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in r.body])
+            result += ".\n"
+        return result
+
+    def write_prog(self, stream):
+        stream.write(self.prog_string(True).encode())
+
 
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
@@ -491,6 +515,8 @@ class Application(object):
         logger.info("   Preprocessing Done")
         logger.info("------------------------------------------------------------")
         
+        with open('out.lp', mode='wb') as file_out:
+            self.write_prog(file_out)
         self.clark_completition()
         #self.kCNF(3)
         #parser = wfParse.WeightedFormulaParser()
