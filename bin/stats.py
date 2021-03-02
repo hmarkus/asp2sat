@@ -32,6 +32,10 @@ from dpdb import treedecomp
 from dpdb.problems.sat_util import *
 from dpdb.writer import StreamWriter
 
+
+logger = logging.getLogger("twstats")
+logging.basicConfig(format='[%(levelname)s] %(name)s: %(message)s', level="INFO")
+
 class Node(object):
     AND = 0
     OR = 1
@@ -165,29 +169,38 @@ class Circuit(object):
                     if child not in done:
                         check.add(child)
 
-    def to_gr(self, stream):
-        name_map = {}
+    def no_holes(self):
+        named = set()
         idx = 1
         check = set([self.root])
-        done = set()
         while len(check) > 0:
             cur = check.pop()
-            done.add(cur)
-            if cur.name not in name_map:
-                name_map[cur.name] = idx
-                idx += 1
-                for child in cur.children:
-                    if child not in done:
-                        check.add(child)
+            named.add(cur)
+            if cur.type == Node.IN:
+                for anc in cur.ancestors:
+                    if anc.type == Node.NEG:
+                        anc.name = idx
+            if cur.type != Node.NEG: 
+                cur.name = idx
+            idx += 1
+            for child in cur.children:
+                if child not in named:
+                    check.add(child)
 
+    def to_gr(self, stream):
+        self.no_holes()
         check = set([self.root])
         edges = set()
         done = set()
+        idx = 0
         while len(check) > 0:
             cur = check.pop()
             done.add(cur)
+            idx = max(idx, cur.name)
             for child in cur.children:
-                edges.add((name_map[cur.name], name_map[child.name]))
+                edges.add((cur.name, child.name))
+                if cur.name == child.name:
+                    print("asdf")
                 if child not in done:
                     check.add(child)
         
@@ -237,13 +250,98 @@ class Circuit(object):
         for c in clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n").encode())
 
-    def tw(self, opt = False):
+
+    def td_guided_to_cnf(self):
+        td = self.td()
+        # maps a node t to a set of rules that need to be considered in t
+        # it actually suffices if every rule is considered only once in the entire td..
+        rules = {}
+        perAtom = {}
+        for a in self._deriv:
+            perAtom[a] = []
+
+        for r in self._program:
+            for a in r.head:
+                perAtom[a].append(r)
+
+        for head in self._deriv:
+            for r in perAtom[head]:
+                r.proven = self.new_var(f"{r}")
+                ands = [-x for x in r.body]
+                self._clauses.append([r.proven] + ands)
+                for at in ands:
+                    self._clauses.append([-r.proven, -at])
+
+        # how many rules have we used and what is the last used variable
+        unfinished = {}
+        # temporary copy of the program, will be empty after the first pass
+        program = list(self._program)
+        # first td pass: determine rules and prove_atoms
+        for t in self._td.nodes:
+            rules[t] = []
+            unfinished[t] = {}
+            t.vertices = set(t.vertices)
+            to_handle = {}
+            for a in t.vertices:
+                to_handle[a] = []
+            for tp in t.children:
+                removed = tp.vertices.difference(t.vertices)
+                for a in removed:
+                    if a in self._deriv:
+                        if a in unfinished[tp]:
+                            final = unfinished[tp].pop(a)
+                            self._clauses.append([-a, final])
+                            self._clauses.append([a, -final])
+                        else: 
+                            self._clauses.append([-a])
+                rest = tp.vertices.intersection(t.vertices)
+                for a in rest:
+                    if a in unfinished[tp]:
+                        to_handle[a].append(unfinished[tp][a])
+            # take the rules we need and remove them
+            rules[t] = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
+            program = [r for r in program if not set(map(abs,r.head + r.body)).issubset(t.vertices)]
+            for r in rules[t]:
+                for a in r.head:
+                    to_handle[a].append(r.proven)
+            
+            # handle all the atoms we have gathered
+            for a in t.vertices:
+                if len(to_handle[a]) >= 1:
+                    last = to_handle[a][0]
+                    for i in range(1,len(to_handle[a])):
+                        new_last = self.new_var("")
+                        self._clauses.append([new_last, -last])
+                        self._clauses.append([new_last, -to_handle[a][i]])
+                        self._clauses.append([-new_last, last, to_handle[a][i]])
+                        last = new_last
+                    unfinished[t][a] = last
+
+        for a in self._td.root.vertices:
+            if a in self._deriv:
+                if a in unfinished[tp]:
+                    final = unfinished[tp].pop(a)
+                    self._clauses.append([-a, final])
+                    self._clauses.append([a, -final])
+                else: 
+                    self._clauses.append([-a])
+
+        constraints = [r for r in self._program if len(r.head) == 0]
+        for r in constraints:
+            self._clauses.append([-x for x in r.body])
+
+    def td(self, opt = False):
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"] + (["--opt", "width"] if opt else []), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.to_gr(p.stdin)
         p.stdin.close()
         tdr = reader.TdReader.from_stream(p.stdout)
         p.wait()
         td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        return td
+
+
+    def tw(self, opt = False):
+        td = self.td(opt = opt)
         logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
 
 
@@ -262,7 +360,7 @@ class Circuit(object):
             res += f"{node.name} [label={node.type},shape=box]\n"
         for node in relevant:
             for node1 in node.children:
-                res += f"{node.name} -> {node1.name}\n"
+                res += f"{node1.name} -> {node.name}\n"
         res += "}"
         stream.write(res.encode())
 
