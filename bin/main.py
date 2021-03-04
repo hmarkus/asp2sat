@@ -55,6 +55,7 @@ import tempfile
 
 import wfParse
 import backdoor
+import stats
 
 class AppConfig(object):
     """
@@ -390,21 +391,23 @@ class Application(object):
         
 
     def _generatePrimalGraph(self):
-        #self.remove_irrelevant()
         self._graph = hypergraph.Hypergraph()
         for r in self._program:
             atoms = set(r.head)
             atoms.update(tuple(map(abs, r.body)))
             self._graph.add_hyperedge(tuple(atoms))
 
+    def _decomposeGraph(self):
+        # Run htd
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        p.stdin.close()
+        tdr = reader.TdReader.from_stream(p.stdout)
+        p.wait()
+        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
 
-        #for sym in self.control.symbolic_atoms:
-        #    if sym.literal in self._atomToVertex:
-        #        print(self._atomToVertex[sym.literal], sym.symbol)
-        #for sym in self.control.symbolic_atoms:
-        #    print(sym.literal, sym.symbol)
-
-    def clark_completition(self):
+    def clark_completion(self):
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
@@ -429,6 +432,85 @@ class Application(object):
         for r in constraints:
             self._clauses.append([-x for x in r.body])
 
+    def td_guided_clark_completion(self):
+        self._generatePrimalGraph()
+        self._decomposeGraph()
+        # maps a node t to a set of rules that need to be considered in t
+        # it actually suffices if every rule is considered only once in the entire td..
+        rules = {}
+        perAtom = {}
+        for a in self._deriv:
+            perAtom[a] = []
+
+        for r in self._program:
+            for a in r.head:
+                perAtom[a].append(r)
+
+        for head in self._deriv:
+            for r in perAtom[head]:
+                r.proven = self.new_var(f"{r}")
+                ands = [-x for x in r.body]
+                self._clauses.append([r.proven] + ands)
+                for at in ands:
+                    self._clauses.append([-r.proven, -at])
+
+        # how many rules have we used and what is the last used variable
+        unfinished = {}
+        # temporary copy of the program, will be empty after the first pass
+        program = list(self._program)
+        # first td pass: determine rules and prove_atoms
+        for t in self._td.nodes:
+            rules[t] = []
+            unfinished[t] = {}
+            t.vertices = set(t.vertices)
+            to_handle = {}
+            for a in t.vertices:
+                to_handle[a] = []
+            for tp in t.children:
+                removed = tp.vertices.difference(t.vertices)
+                for a in removed:
+                    if a in self._deriv:
+                        if a in unfinished[tp]:
+                            final = unfinished[tp].pop(a)
+                            self._clauses.append([-a, final])
+                            self._clauses.append([a, -final])
+                        else: 
+                            self._clauses.append([-a])
+                rest = tp.vertices.intersection(t.vertices)
+                for a in rest:
+                    if a in unfinished[tp]:
+                        to_handle[a].append(unfinished[tp][a])
+            # take the rules we need and remove them
+            rules[t] = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
+            program = [r for r in program if not set(map(abs,r.head + r.body)).issubset(t.vertices)]
+            for r in rules[t]:
+                for a in r.head:
+                    to_handle[a].append(r.proven)
+            
+            # handle all the atoms we have gathered
+            for a in t.vertices:
+                if len(to_handle[a]) >= 1:
+                    last = to_handle[a][0]
+                    for i in range(1,len(to_handle[a])):
+                        new_last = self.new_var("")
+                        self._clauses.append([new_last, -last])
+                        self._clauses.append([new_last, -to_handle[a][i]])
+                        self._clauses.append([-new_last, last, to_handle[a][i]])
+                        last = new_last
+                    unfinished[t][a] = last
+
+        for a in self._td.root.vertices:
+            if a in self._deriv:
+                if a in unfinished[tp]:
+                    final = unfinished[tp].pop(a)
+                    self._clauses.append([-a, final])
+                    self._clauses.append([a, -final])
+                else: 
+                    self._clauses.append([-a])
+
+        constraints = [r for r in self._program if len(r.head) == 0]
+        for r in constraints:
+            self._clauses.append([-x for x in r.body])
 
     def kCNF(self, k):
         if k <= 2:
@@ -469,7 +551,7 @@ class Application(object):
         return result
 
     def write_prog(self, stream):
-        stream.write(self.prog_string(True).encode())
+        stream.write(self.prog_string(False).encode())
 
 
     def encoding_stats(self):
@@ -510,7 +592,6 @@ class Application(object):
 
         self._normalize()
 
-        #self._generatePrimalGraph()
         self.preprocess()
         #cProfile.run('self.treeprocess()')
         logger.info("   Preprocessing Done")
@@ -518,7 +599,10 @@ class Application(object):
         
         with open('out.lp', mode='wb') as file_out:
             self.write_prog(file_out)
-        self.clark_completition()
+        #self.clark_completion()
+        logger.info("   Stats translation")
+        logger.info("------------------------------------------------------------")
+        self.td_guided_clark_completion()
         #self.kCNF(3)
         #parser = wfParse.WeightedFormulaParser()
         #sem = wfParse.WeightedFormulaSemantics(self)
@@ -527,10 +611,21 @@ class Application(object):
         #self.kCNF(10)
         with open('out.cnf', mode='wb') as file_out:
             self.write_dimacs(file_out)
+        logger.info("   Stats CNF")
+        logger.info("------------------------------------------------------------")
         self.encoding_stats()
-        #with open('out.lp', mode='wb') as file_out:
-        #    self._breakCycles(file_out)
-        #self._buildSDD()
+        logger.info("   Stats Circuit")
+        logger.info("------------------------------------------------------------")
+        circ = stats.Circuit(self._program, self._deriv, self._guess)
+        circ.simp()
+        circ.tw(opt = True)
+        with open('out.dot', mode='wb') as file_out:
+            circ.to_dot(file_out)
+        with open('out_simp.cnf', mode='wb') as file_out:
+            circ.to_cnf(file_out)
+        logger.info("   Stats Simplified CNF")
+        logger.info("------------------------------------------------------------")
+        stats.encoding_stats('out_simp.cnf')
 
 if __name__ == "__main__":
     sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
