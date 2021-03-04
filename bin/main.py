@@ -613,6 +613,8 @@ class Application(object):
             self.write_dimacs(file_out)
         logger.info("   Stats CNF")
         logger.info("------------------------------------------------------------")
+        return
+
         self.encoding_stats()
         logger.info("   Stats Circuit")
         logger.info("------------------------------------------------------------")
