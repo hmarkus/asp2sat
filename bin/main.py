@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Main module providing the application logic.
 """
@@ -274,7 +276,7 @@ class Application(object):
     def compute_backdoor(self, idx):
         comp = self._condensation.nodes[idx]["members"]
         c = backdoor.ClingoControl(self.write_scc(comp))
-        res = c.get_backdoor("./guess_tree.lp")[2][0]
+        res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
         #print(res)
         #local_dep = self.dep.subgraph(comp)
         #nx.draw(local_dep)
