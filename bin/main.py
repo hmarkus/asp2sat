@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/home/hecher/miniconda3/bin/python3
+##/usr/bin/env python3
 
 """
 Main module providing the application logic.
@@ -22,9 +23,9 @@ import math
 from itertools import product
 
 import queue
-
+import time
 # set library path
-
+#start = time.time()
 # TODO: fixme
 src_path = os.path.abspath(os.path.realpath(inspect.getfile(inspect.currentframe())))
 sys.path.insert(0, os.path.realpath(os.path.join(src_path, '../..')))
@@ -568,6 +569,10 @@ class Application(object):
             
         
     def main(self, clingo_control, files):
+
+        start = time.time()
+
+        #time.sleep(2)
         """
         Entry point of the application registering the propagator and
         implementing the standard ground and solve functionality.
@@ -613,6 +618,10 @@ class Application(object):
             self.write_dimacs(file_out)
         logger.info("   Stats CNF")
         logger.info("------------------------------------------------------------")
+
+        end = time.time()
+
+        print("PREPROCESSING: " + str(end - start))
         return
 
         self.encoding_stats()
