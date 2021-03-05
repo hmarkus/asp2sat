@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Main module providing the application logic.
 """
@@ -238,7 +240,7 @@ class Program(object):
     def compute_backdoor(self, idx):
         comp = self._condensation.nodes[idx]["members"]
         c = backdoor.ClingoControl(self.write_scc(comp))
-        res = c.get_backdoor("./guess_tree.lp")[2][0]
+        res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
         #print(res)
         #local_dep = self.dep.subgraph(comp)
         #nx.draw(local_dep)
@@ -527,12 +529,6 @@ class Program(object):
         td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
             
-        
-    def main(self, clingo_control, files):
-        """
-        Entry point of the application registering the propagator and
-        implementing the standard ground and solve functionality.
-        """
 
 if __name__ == "__main__":
     control = clingoext.Control()
