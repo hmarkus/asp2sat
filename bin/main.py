@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.realpath(os.path.join(src_path, '../..')))
 
 src_path = os.path.realpath(os.path.join(src_path, '../../lib'))
 
-libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd']
+libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd', 'minic2d']
 
 if src_path not in sys.path:
     for lib in libs:
@@ -654,7 +654,7 @@ if __name__ == "__main__":
     logger.info("   Stats CNF")
     logger.info("------------------------------------------------------------")
     program.encoding_stats()
-    p = subprocess.Popen(["/home/rafael/miniC2D-1.0.0/bin/linux/miniC2D", "-c", "out.cnf"], stdout=subprocess.PIPE)
+    p = subprocess.Popen([os.path.join(src_path, "minic2d/bin/miniC2D"), "-c", "out.cnf"], stdout=subprocess.PIPE)
     p.wait()
     import circuit
     circ = circuit.Circuit("out.cnf.nnf")
