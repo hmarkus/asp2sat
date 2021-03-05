@@ -4,21 +4,12 @@ Main module providing the application logic.
 
 import matplotlib.pyplot as plt
 import sys
-# from textwrap import dedent
-from collections import OrderedDict
-import clingo
-#import clingoext
-from pprint import pprint
 import networkx as nx
-#import lib.htd_validate
-#from groundprogram import ClingoRule
 import os
 import inspect
 import logging
 import subprocess
 import math
-from itertools import product
-
 import queue
 
 # set library path
@@ -43,62 +34,54 @@ from htd_validate.utils import hypergraph, graph
 
 import clingoext
 from clingoext import ClingoRule
-#from htd_validate.decompositions import *
 from dpdb import reader
 from dpdb import treedecomp
 from dpdb.problems.sat_util import *
-from dpdb.writer import StreamWriter, FileWriter
-from dpdb.reader import CnfReader
+from dpdb.writer import StreamWriter
 import tempfile
 
 import wfParse
 import backdoor
 import stats
-
-class AppConfig(object):
-    """
-    Class for application specific options.
-    """
-
-    def __init__(self):
-        self.eclingo_verbose = 0
+import grounder
+from parser import ProblogParser, ProblogSemantics
 
 class Rule(object):
     def __init__(self, head, body):
         self.head = head
         self.body = body
 
-class Application(object):
-    """
-    Application class that can be used with `clingo.clingo_main` to solve CSP
-    problems.
-    """
-
-    def __init__(self):
-        self.program_name = "clingoext"
-        self.version = "0.0.1"
-        self.config = AppConfig()
+class Program(object):
+    def __init__(self, clingo_control):
         # the variable counter
         self._max = 0
         self._nameMap = {}
         # store the clauses here
         self._clauses = []
-        # store the projected variables
+        # remember which variables are guesses and which are derived
         self._guess = set()
         self._deriv = set()
         self._copies = {}
+        self._normalize(clingo_control)
 
-    def _normalize(self):
-        self.remove_tautologies()
+    def remove_tautologies(self, clingo_control):
+        tmp = []
+        for o in clingo_control.ground_program.objects:
+            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
+                tmp.append(o)
+        return tmp
+
+    def _normalize(self, clingo_control):
+        program = self.remove_tautologies(clingo_control)
         self._program = []
         _atomToVertex = {} # htd wants succinct numbering of vertices / no holes
         _vertexToAtom = {} # inverse mapping of _atomToVertex 
         unary = []
 
         symbol_map = {}
-        for sym in self.control.symbolic_atoms:
+        for sym in clingo_control.symbolic_atoms:
             symbol_map[sym.literal] = str(sym.symbol)
-        for o in self.control.ground_program.objects:
+        for o in program:
             if isinstance(o, ClingoRule):
                 o.atoms = set(o.head)
                 o.atoms.update(tuple(map(abs, o.body)))
@@ -128,21 +111,8 @@ class Application(object):
         self._deriv = set(range(1,self._max + 1)).difference(self._guess)
 
 
-    def _read(self, path):
-        if path == "-":
-            return sys.stdin.read()
-        with open(path) as file_:
-            return file_.read()
-
     def primalGraph(self):
         return self._graph
-
-    def var2idx(self, var):
-        sym = clingo.parse_term(var)
-        if sym in self.control.symbolic_atoms:
-            lit = self.control.symbolic_atoms[sym].literal
-            return self._atomToVertex[lit]
-        return 0
 
     def new_var(self, name):
         self._max += 1
@@ -170,13 +140,6 @@ class Application(object):
         nv = self.new_var(name)
         self._copies[pred+inputs].append(nv)
         return nv
-
-    def remove_tautologies(self):
-        tmp = []
-        for o in self.control.ground_program.objects:
-            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
-                tmp.append(o)
-        self.control.ground_program.objects = tmp
 
     def _computeComponents(self):
         self.dep = nx.DiGraph()
@@ -386,24 +349,6 @@ class Application(object):
             if len(comp) > 1:
                 print("this should not happen")
                 exit(-1)
-        
-
-    def _generatePrimalGraph(self):
-        self._graph = hypergraph.Hypergraph()
-        for r in self._program:
-            atoms = set(r.head)
-            atoms.update(tuple(map(abs, r.body)))
-            self._graph.add_hyperedge(tuple(atoms))
-
-    def _decomposeGraph(self):
-        # Run htd
-        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
-        p.stdin.close()
-        tdr = reader.TdReader.from_stream(p.stdout)
-        p.wait()
-        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
-        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
 
     def clark_completion(self):
         perAtom = {}
@@ -430,12 +375,27 @@ class Application(object):
         for r in constraints:
             self._clauses.append([-x for x in r.body])
 
+    def _generatePrimalGraph(self):
+        self._graph = hypergraph.Hypergraph()
+        for r in self._program:
+            atoms = set(r.head)
+            atoms.update(tuple(map(abs, r.body)))
+            self._graph.add_hyperedge(tuple(atoms))
+
+    def _decomposeGraph(self):
+        # Run htd
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        p.stdin.close()
+        tdr = reader.TdReader.from_stream(p.stdout)
+        p.wait()
+        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
+
     def td_guided_clark_completion(self):
         self._generatePrimalGraph()
         self._decomposeGraph()
         # maps a node t to a set of rules that need to be considered in t
-        # it actually suffices if every rule is considered only once in the entire td..
-        rules = {}
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
@@ -458,7 +418,6 @@ class Application(object):
         program = list(self._program)
         # first td pass: determine rules and prove_atoms
         for t in self._td.nodes:
-            rules[t] = []
             unfinished[t] = {}
             t.vertices = set(t.vertices)
             to_handle = {}
@@ -479,12 +438,12 @@ class Application(object):
                     if a in unfinished[tp]:
                         to_handle[a].append(unfinished[tp][a])
             # take the rules we need and remove them
-            rules[t] = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
+            rules = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
             program = [r for r in program if not set(map(abs,r.head + r.body)).issubset(t.vertices)]
-            for r in rules[t]:
+            for r in rules:
                 for a in r.head:
                     to_handle[a].append(r.proven)
-            
+
             # handle all the atoms we have gathered
             for a in t.vertices:
                 if len(to_handle[a]) >= 1:
@@ -499,8 +458,8 @@ class Application(object):
 
         for a in self._td.root.vertices:
             if a in self._deriv:
-                if a in unfinished[tp]:
-                    final = unfinished[tp].pop(a)
+                if a in unfinished[self._td.root]:
+                    final = unfinished[self._td.root].pop(a)
                     self._clauses.append([-a, final])
                     self._clauses.append([a, -final])
                 else: 
@@ -527,19 +486,23 @@ class Application(object):
         self._clauses = pc
 
 
-    def write_dimacs(self, stream):
+    def write_dimacs(self, stream, debug = False):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
-        for c in self._clauses:
-            stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+        if debug:
+            for c in self._clauses:
+                stream.write((" ".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in c]) + " 0\n" ).encode())
+        else:
+            for c in self._clauses:
+                stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
 
-    def prog_string(self, problog=False):
+    def prog_string(self, program, problog=False):
         result = ""
         for v in self._guess:
             if problog:
                 result += f"0.5::{self._nameMap[v]}.\n"
             else:
                 result += f"{{{self._nameMap[v]}}}.\n"
-        for r in self._program:
+        for r in program:
             result += ";".join([self._nameMap[v] for v in r.head])
             result += ":-"
             result += ",".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in r.body])
@@ -549,7 +512,7 @@ class Application(object):
         return result
 
     def write_prog(self, stream):
-        stream.write(self.prog_string(False).encode())
+        stream.write(self.prog_string(self._program, False).encode())
 
 
     def encoding_stats(self):
@@ -570,60 +533,62 @@ class Application(object):
         Entry point of the application registering the propagator and
         implementing the standard ground and solve functionality.
         """
-        if not files:
-            files = ["-"]
-
-        self.control = clingoext.Control()
-
-        for path in files:
-            self.control.add("base", [], self._read(path))
-
-        self.control.ground()
-
-        logger.info("------------------------------------------------------------")
-        logger.info("   Grounded Program")
-        logger.info("------------------------------------------------------------")
-        #pprint(self.control.ground_program.objects)
-        logger.info("------------------------------------------------------------")
-        logger.info(self.control.ground_program)
-        logger.info("------------------------------------------------------------")
-
-        self._normalize()
-
-        self.preprocess()
-        #cProfile.run('self.treeprocess()')
-        logger.info("   Preprocessing Done")
-        logger.info("------------------------------------------------------------")
-        
-        with open('out.lp', mode='wb') as file_out:
-            self.write_prog(file_out)
-        #self.clark_completion()
-        logger.info("   Stats translation")
-        logger.info("------------------------------------------------------------")
-        self.td_guided_clark_completion()
-        #self.kCNF(3)
-        #parser = wfParse.WeightedFormulaParser()
-        #sem = wfParse.WeightedFormulaSemantics(self)
-        #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
-        #parser.parse(wf, semantics = sem)
-        #self.kCNF(10)
-        with open('out.cnf', mode='wb') as file_out:
-            self.write_dimacs(file_out)
-        logger.info("   Stats CNF")
-        logger.info("------------------------------------------------------------")
-        self.encoding_stats()
-        logger.info("   Stats Circuit")
-        logger.info("------------------------------------------------------------")
-        circ = stats.Circuit(self._program, self._deriv, self._guess)
-        circ.simp()
-        circ.tw(opt = True)
-        with open('out.dot', mode='wb') as file_out:
-            circ.to_dot(file_out)
-        with open('out_simp.cnf', mode='wb') as file_out:
-            circ.to_cnf(file_out)
-        logger.info("   Stats Simplified CNF")
-        logger.info("------------------------------------------------------------")
-        stats.encoding_stats('out_simp.cnf')
 
 if __name__ == "__main__":
-    sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
+    control = clingoext.Control()
+    mode = sys.argv[1]
+    if mode == "asp":
+        program_files = sys.argv[2:]
+        program_str = None
+        if not program_files:
+            program_str = sys.stdin.read()
+    elif mode == "problog":
+        files = sys.argv[2:]
+        program_str = ""
+        if not files:
+            program_str = sys.stdin.read()
+        for path in files:
+            with open(path) as file_:
+                program_str += file_.read()
+        parser = ProblogParser()
+        program = parser.parse(program_str, semantics = ProblogSemantics())
+
+        program_str = "".join([ r.asp_string() for r in program])
+        program_files = []
+    grounder.ground(control, program_str = program_str, program_files = program_files)
+    program = Program(control)
+
+    program.preprocess()
+    logger.info("   Preprocessing Done")
+    logger.info("------------------------------------------------------------")
+    
+    with open('out.lp', mode='wb') as file_out:
+        program.write_prog(file_out)
+    logger.info("   Stats translation")
+    logger.info("------------------------------------------------------------")
+    #program.clark_completion()
+    program.td_guided_clark_completion()
+    #program.kCNF(3)
+    #parser = wfParse.WeightedFormulaParser()
+    #sem = wfParse.WeightedFormulaSemantics(program)
+    #wf = "#(1)"
+    #parser.parse(wf, semantics = sem)
+    with open('out.cnf', mode='wb') as file_out:
+        program.write_dimacs(file_out)
+    #with open('dbg.cnf', mode='wb') as file_out:
+    #    program.write_dimacs(file_out, debug = True)
+    logger.info("   Stats CNF")
+    logger.info("------------------------------------------------------------")
+    program.encoding_stats()
+    logger.info("   Stats Circuit")
+    logger.info("------------------------------------------------------------")
+    circ = stats.Circuit(program._program, program._deriv, program._guess)
+    circ.simp()
+    circ.tw(opt = True)
+    with open('out.dot', mode='wb') as file_out:
+        circ.to_dot(file_out)
+    with open('out_simp.cnf', mode='wb') as file_out:
+        circ.to_cnf(file_out)
+    logger.info("   Stats Simplified CNF")
+    logger.info("------------------------------------------------------------")
+    stats.encoding_stats('out_simp.cnf')
