@@ -6,22 +6,14 @@ Main module providing the application logic.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 import sys
-# from textwrap import dedent
-from collections import OrderedDict
-import clingo
-#import clingoext
-from pprint import pprint
 import networkx as nx
-#import lib.htd_validate
-#from groundprogram import ClingoRule
 import os
 import inspect
 import logging
 import subprocess
 import math
-from itertools import product
-
 import queue
 import time
 # set library path
@@ -46,62 +38,54 @@ from htd_validate.utils import hypergraph, graph
 
 import clingoext
 from clingoext import ClingoRule
-#from htd_validate.decompositions import *
 from dpdb import reader
 from dpdb import treedecomp
 from dpdb.problems.sat_util import *
-from dpdb.writer import StreamWriter, FileWriter
-from dpdb.reader import CnfReader
+from dpdb.writer import StreamWriter
 import tempfile
 
 import wfParse
 import backdoor
 import stats
-
-class AppConfig(object):
-    """
-    Class for application specific options.
-    """
-
-    def __init__(self):
-        self.eclingo_verbose = 0
+import grounder
+from parser import ProblogParser, ProblogSemantics
 
 class Rule(object):
     def __init__(self, head, body):
         self.head = head
         self.body = body
 
-class Application(object):
-    """
-    Application class that can be used with `clingo.clingo_main` to solve CSP
-    problems.
-    """
-
-    def __init__(self):
-        self.program_name = "clingoext"
-        self.version = "0.0.1"
-        self.config = AppConfig()
+class Program(object):
+    def __init__(self, clingo_control):
         # the variable counter
         self._max = 0
         self._nameMap = {}
         # store the clauses here
         self._clauses = []
-        # store the projected variables
+        # remember which variables are guesses and which are derived
         self._guess = set()
         self._deriv = set()
         self._copies = {}
+        self._normalize(clingo_control)
 
-    def _normalize(self):
-        self.remove_tautologies()
+    def remove_tautologies(self, clingo_control):
+        tmp = []
+        for o in clingo_control.ground_program.objects:
+            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
+                tmp.append(o)
+        return tmp
+
+    def _normalize(self, clingo_control):
+        program = self.remove_tautologies(clingo_control)
         self._program = []
         _atomToVertex = {} # htd wants succinct numbering of vertices / no holes
         _vertexToAtom = {} # inverse mapping of _atomToVertex 
         unary = []
 
         symbol_map = {}
-        for sym in self.control.symbolic_atoms:
+        for sym in clingo_control.symbolic_atoms:
             symbol_map[sym.literal] = str(sym.symbol)
-        for o in self.control.ground_program.objects:
+        for o in program:
             if isinstance(o, ClingoRule):
                 o.atoms = set(o.head)
                 o.atoms.update(tuple(map(abs, o.body)))
@@ -131,21 +115,8 @@ class Application(object):
         self._deriv = set(range(1,self._max + 1)).difference(self._guess)
 
 
-    def _read(self, path):
-        if path == "-":
-            return sys.stdin.read()
-        with open(path) as file_:
-            return file_.read()
-
     def primalGraph(self):
         return self._graph
-
-    def var2idx(self, var):
-        sym = clingo.parse_term(var)
-        if sym in self.control.symbolic_atoms:
-            lit = self.control.symbolic_atoms[sym].literal
-            return self._atomToVertex[lit]
-        return 0
 
     def new_var(self, name):
         self._max += 1
@@ -173,13 +144,6 @@ class Application(object):
         nv = self.new_var(name)
         self._copies[pred+inputs].append(nv)
         return nv
-
-    def remove_tautologies(self):
-        tmp = []
-        for o in self.control.ground_program.objects:
-            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
-                tmp.append(o)
-        self.control.ground_program.objects = tmp
 
     def _computeComponents(self):
         self.dep = nx.DiGraph()
@@ -389,24 +353,6 @@ class Application(object):
             if len(comp) > 1:
                 print("this should not happen")
                 exit(-1)
-        
-
-    def _generatePrimalGraph(self):
-        self._graph = hypergraph.Hypergraph()
-        for r in self._program:
-            atoms = set(r.head)
-            atoms.update(tuple(map(abs, r.body)))
-            self._graph.add_hyperedge(tuple(atoms))
-
-    def _decomposeGraph(self):
-        # Run htd
-        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
-        p.stdin.close()
-        tdr = reader.TdReader.from_stream(p.stdout)
-        p.wait()
-        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
-        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
 
     def clark_completion(self):
         perAtom = {}
@@ -433,12 +379,27 @@ class Application(object):
         for r in constraints:
             self._clauses.append([-x for x in r.body])
 
+    def _generatePrimalGraph(self):
+        self._graph = hypergraph.Hypergraph()
+        for r in self._program:
+            atoms = set(r.head)
+            atoms.update(tuple(map(abs, r.body)))
+            self._graph.add_hyperedge(tuple(atoms))
+
+    def _decomposeGraph(self):
+        # Run htd
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        p.stdin.close()
+        tdr = reader.TdReader.from_stream(p.stdout)
+        p.wait()
+        self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
+        logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
+
     def td_guided_clark_completion(self):
         self._generatePrimalGraph()
         self._decomposeGraph()
         # maps a node t to a set of rules that need to be considered in t
-        # it actually suffices if every rule is considered only once in the entire td..
-        rules = {}
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
@@ -461,7 +422,6 @@ class Application(object):
         program = list(self._program)
         # first td pass: determine rules and prove_atoms
         for t in self._td.nodes:
-            rules[t] = []
             unfinished[t] = {}
             t.vertices = set(t.vertices)
             to_handle = {}
@@ -482,28 +442,27 @@ class Application(object):
                     if a in unfinished[tp]:
                         to_handle[a].append(unfinished[tp][a])
             # take the rules we need and remove them
-            rules[t] = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
+            rules = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
             program = [r for r in program if not set(map(abs,r.head + r.body)).issubset(t.vertices)]
-            for r in rules[t]:
+            for r in rules:
                 for a in r.head:
                     to_handle[a].append(r.proven)
-            
+
             # handle all the atoms we have gathered
             for a in t.vertices:
-                if len(to_handle[a]) >= 1:
-                    last = to_handle[a][0]
-                    for i in range(1,len(to_handle[a])):
-                        new_last = self.new_var("")
-                        self._clauses.append([new_last, -last])
-                        self._clauses.append([new_last, -to_handle[a][i]])
-                        self._clauses.append([-new_last, last, to_handle[a][i]])
-                        last = new_last
-                    unfinished[t][a] = last
+                if len(to_handle[a]) > 1:
+                    new_last = self.new_var("{t},{a}")
+                    self._clauses.append([-new_last] + to_handle[a])
+                    for at in to_handle[a]:
+                        self._clauses.append([new_last, -at])
+                    unfinished[t][a] = new_last
+                elif len(to_handle[a]) == 1:
+                    unfinished[t][a] = to_handle[a][0]
 
         for a in self._td.root.vertices:
             if a in self._deriv:
-                if a in unfinished[tp]:
-                    final = unfinished[tp].pop(a)
+                if a in unfinished[self._td.root]:
+                    final = unfinished[self._td.root].pop(a)
                     self._clauses.append([-a, final])
                     self._clauses.append([a, -final])
                 else: 
@@ -530,19 +489,23 @@ class Application(object):
         self._clauses = pc
 
 
-    def write_dimacs(self, stream):
+    def write_dimacs(self, stream, debug = False):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
-        for c in self._clauses:
-            stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+        if debug:
+            for c in self._clauses:
+                stream.write((" ".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in c]) + " 0\n" ).encode())
+        else:
+            for c in self._clauses:
+                stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
 
-    def prog_string(self, problog=False):
+    def prog_string(self, program, problog=False):
         result = ""
         for v in self._guess:
             if problog:
                 result += f"0.5::{self._nameMap[v]}.\n"
             else:
                 result += f"{{{self._nameMap[v]}}}.\n"
-        for r in self._program:
+        for r in program:
             result += ";".join([self._nameMap[v] for v in r.head])
             result += ":-"
             result += ",".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in r.body])
@@ -552,7 +515,7 @@ class Application(object):
         return result
 
     def write_prog(self, stream):
-        stream.write(self.prog_string(False).encode())
+        stream.write(self.prog_string(self._program, False).encode())
 
 
     def encoding_stats(self):
@@ -567,7 +530,6 @@ class Application(object):
         td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
             
-        
     def main(self, clingo_control, files):
 
         start = time.time()
@@ -639,4 +601,95 @@ class Application(object):
         stats.encoding_stats('out_simp.cnf')
 
 if __name__ == "__main__":
-    sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
+    control = clingoext.Control()
+    mode = sys.argv[1]
+    weights = {}
+    if mode == "asp":
+        program_files = sys.argv[2:]
+        program_str = None
+        if not program_files:
+            program_str = sys.stdin.read()
+    elif mode == "problog":
+        files = sys.argv[2:]
+        program_str = ""
+        if not files:
+            program_str = sys.stdin.read()
+        for path in files:
+            with open(path) as file_:
+                program_str += file_.read()
+        parser = ProblogParser()
+        program = parser.parse(program_str, semantics = ProblogSemantics())
+        queries = [ r for r in program if r.is_query() ]
+        program = [ r for r in program if not r.is_query() ]
+
+        for r in program:
+            if r.probability is not None:
+                weights[str(r.head)] = float(r.probability)
+
+        program_str = "".join([ r.asp_string() for r in program])
+        program_files = []
+    grounder.ground(control, program_str = program_str, program_files = program_files)
+    program = Program(control)
+
+    program.preprocess()
+    logger.info("   Preprocessing Done")
+    logger.info("------------------------------------------------------------")
+    
+    with open('out.lp', mode='wb') as file_out:
+        program.write_prog(file_out)
+    logger.info("   Stats translation")
+    logger.info("------------------------------------------------------------")
+    #program.clark_completion()
+    program.td_guided_clark_completion()
+    
+    #print(weight_list)
+    #program.kCNF(3)
+    #parser = wfParse.WeightedFormulaParser()
+    #sem = wfParse.WeightedFormulaSemantics(program)
+    #wf = "#(1)"
+    #parser.parse(wf, semantics = sem)
+    with open('out.cnf', mode='wb') as file_out:
+        program.write_dimacs(file_out)
+
+    logger.info("   Stats CNF")
+    logger.info("------------------------------------------------------------")
+    program.encoding_stats()
+    p = subprocess.Popen(["/home/rafael/miniC2D-1.0.0/bin/linux/miniC2D", "-c", "out.cnf"], stdout=subprocess.PIPE)
+    p.wait()
+    import circuit
+    circ = circuit.Circuit("out.cnf.nnf")
+    if mode == "asp":
+        weight_list = [ np.array([1.0]) for _ in range(program._max*2) ]
+    elif mode == "problog":
+        query_cnt = len(queries)
+        varMap = { name : var for  var, name in program._nameMap.items() }
+        weight_list = [ np.full(query_cnt, 1.0) for _ in range(program._max*2) ]
+        for name in weights:
+            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name])
+            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, 1.0 - weights[name])
+        for i, query in enumerate(queries):
+            atom = str(query.atom)
+            weight_list[(varMap[atom]-1)*2 + 1][i] = 0.0
+    logger.info("   Results")
+    logger.info("------------------------------------------------------------")
+    results = circ.wmc(weight_list)
+    if mode == "asp":
+        logger.info(f"The program has {int(results[0])} models")
+    elif mode == "problog":
+        for i, query in enumerate(queries):
+            atom = str(query.atom)
+            logger.info(f"{atom}: {' '*max(1,(20 - len(atom)))}{results[i]}")
+    #with open('dbg.cnf', mode='wb') as file_out:
+    #    program.write_dimacs(file_out, debug = True)
+    #logger.info("   Stats Circuit")
+    #logger.info("------------------------------------------------------------")
+    #circ = stats.Circuit(program._program, program._deriv, program._guess)
+    #circ.simp()
+    #circ.tw(opt = True)
+    #with open('out.dot', mode='wb') as file_out:
+    #    circ.to_dot(file_out)
+    #with open('out_simp.cnf', mode='wb') as file_out:
+    #    circ.to_cnf(file_out)
+    #logger.info("   Stats Simplified CNF")
+    #logger.info("------------------------------------------------------------")
+    #stats.encoding_stats('out_simp.cnf')

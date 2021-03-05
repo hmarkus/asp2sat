@@ -143,8 +143,6 @@ class Circuit(object):
                     if cur.type == child.type and cur.type <= 1 and all([anc.type == cur.type for anc in child.ancestors]):
                     #if cur.type == child.type and cur.type <= 1 and len(child.ancestors) == 1: 
                         child.ancestors.remove(cur)
-                        if len(child.ancestors) > 0:
-                            print("happened")
                         for child2 in child.children:
                             if len(child.ancestors) == 0:
                                 child2.ancestors.remove(child)
