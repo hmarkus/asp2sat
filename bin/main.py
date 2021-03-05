@@ -5,6 +5,7 @@ Main module providing the application logic.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 import sys
 import networkx as nx
 import os
@@ -448,15 +449,14 @@ class Program(object):
 
             # handle all the atoms we have gathered
             for a in t.vertices:
-                if len(to_handle[a]) >= 1:
-                    last = to_handle[a][0]
-                    for i in range(1,len(to_handle[a])):
-                        new_last = self.new_var("")
-                        self._clauses.append([new_last, -last])
-                        self._clauses.append([new_last, -to_handle[a][i]])
-                        self._clauses.append([-new_last, last, to_handle[a][i]])
-                        last = new_last
-                    unfinished[t][a] = last
+                if len(to_handle[a]) > 1:
+                    new_last = self.new_var("{t},{a}")
+                    self._clauses.append([-new_last] + to_handle[a])
+                    for at in to_handle[a]:
+                        self._clauses.append([new_last, -at])
+                    unfinished[t][a] = new_last
+                elif len(to_handle[a]) == 1:
+                    unfinished[t][a] = to_handle[a][0]
 
         for a in self._td.root.vertices:
             if a in self._deriv:
@@ -533,6 +533,7 @@ class Program(object):
 if __name__ == "__main__":
     control = clingoext.Control()
     mode = sys.argv[1]
+    weights = {}
     if mode == "asp":
         program_files = sys.argv[2:]
         program_str = None
@@ -548,6 +549,12 @@ if __name__ == "__main__":
                 program_str += file_.read()
         parser = ProblogParser()
         program = parser.parse(program_str, semantics = ProblogSemantics())
+        queries = [ r for r in program if r.is_query() ]
+        program = [ r for r in program if not r.is_query() ]
+
+        for r in program:
+            if r.probability is not None:
+                weights[str(r.head)] = float(r.probability)
 
         program_str = "".join([ r.asp_string() for r in program])
         program_files = []
@@ -564,6 +571,8 @@ if __name__ == "__main__":
     logger.info("------------------------------------------------------------")
     #program.clark_completion()
     program.td_guided_clark_completion()
+    
+    #print(weight_list)
     #program.kCNF(3)
     #parser = wfParse.WeightedFormulaParser()
     #sem = wfParse.WeightedFormulaSemantics(program)
@@ -571,20 +580,46 @@ if __name__ == "__main__":
     #parser.parse(wf, semantics = sem)
     with open('out.cnf', mode='wb') as file_out:
         program.write_dimacs(file_out)
-    #with open('dbg.cnf', mode='wb') as file_out:
-    #    program.write_dimacs(file_out, debug = True)
+
     logger.info("   Stats CNF")
     logger.info("------------------------------------------------------------")
     program.encoding_stats()
-    logger.info("   Stats Circuit")
+    p = subprocess.Popen(["/home/rafael/miniC2D-1.0.0/bin/linux/miniC2D", "-c", "out.cnf"], stdout=subprocess.PIPE)
+    p.wait()
+    import circuit
+    circ = circuit.Circuit("out.cnf.nnf")
+    if mode == "asp":
+        weight_list = [ np.array([1.0]) for _ in range(program._max*2) ]
+    elif mode == "problog":
+        query_cnt = len(queries)
+        varMap = { name : var for  var, name in program._nameMap.items() }
+        weight_list = [ np.full(query_cnt, 1.0) for _ in range(program._max*2) ]
+        for name in weights:
+            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name])
+            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, 1.0 - weights[name])
+        for i, query in enumerate(queries):
+            atom = str(query.atom)
+            weight_list[(varMap[atom]-1)*2 + 1][i] = 0.0
+    logger.info("   Results")
     logger.info("------------------------------------------------------------")
-    circ = stats.Circuit(program._program, program._deriv, program._guess)
-    circ.simp()
-    circ.tw(opt = True)
-    with open('out.dot', mode='wb') as file_out:
-        circ.to_dot(file_out)
-    with open('out_simp.cnf', mode='wb') as file_out:
-        circ.to_cnf(file_out)
-    logger.info("   Stats Simplified CNF")
-    logger.info("------------------------------------------------------------")
-    stats.encoding_stats('out_simp.cnf')
+    results = circ.wmc(weight_list)
+    if mode == "asp":
+        logger.info(f"The program has {int(results[0])} models")
+    elif mode == "problog":
+        for i, query in enumerate(queries):
+            atom = str(query.atom)
+            logger.info(f"{atom}: {' '*max(1,(20 - len(atom)))}{results[i]}")
+    #with open('dbg.cnf', mode='wb') as file_out:
+    #    program.write_dimacs(file_out, debug = True)
+    #logger.info("   Stats Circuit")
+    #logger.info("------------------------------------------------------------")
+    #circ = stats.Circuit(program._program, program._deriv, program._guess)
+    #circ.simp()
+    #circ.tw(opt = True)
+    #with open('out.dot', mode='wb') as file_out:
+    #    circ.to_dot(file_out)
+    #with open('out_simp.cnf', mode='wb') as file_out:
+    #    circ.to_cnf(file_out)
+    #logger.info("   Stats Simplified CNF")
+    #logger.info("------------------------------------------------------------")
+    #stats.encoding_stats('out_simp.cnf')

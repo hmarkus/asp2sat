@@ -1,13 +1,13 @@
 class ProbabilisticRule(object):
     def __init__(self, head, body = None, probability = None):
         self.head = head
-        self.body = body if body != None else []
+        self.body = body if body is not None else []
         self.probability = probability
 
     def __str__(self):
         res = ""
-        if self.head != None:
-            if self.probability != None:
+        if self.head is not None:
+            if self.probability is not None:
                 res += f"{self.probability}::"
             res += f"{str(self.head)}"
             if len(self.body) > 0:
@@ -20,8 +20,8 @@ class ProbabilisticRule(object):
     
     def asp_string(self):
         res = ""
-        if self.head != None:
-            if self.probability != None:
+        if self.head is not None:
+            if self.probability is not None:
                 res += f"{{{str(self.head)}}}"
             else:
                 res += str(self.head)
@@ -31,12 +31,28 @@ class ProbabilisticRule(object):
             res += "."
         return res
 
+    def is_query(self):
+        return False
+
+class Query(object):
+    def __init__(self, atom):
+        self.atom = atom
+
+    def __str__(self):
+        return f"query({str(self.atom)})."
+
+    def asp_string(self):
+        return f":-not {str(self.atom)}."
+
+
+    def is_query(self):
+        return True
 
 
 class Atom(object):
     def __init__(self, predicate, inputs = None, negated = False):
         self.predicate = predicate
-        self.inputs = inputs if inputs != None else []
+        self.inputs = inputs if inputs is not None else []
         self.negated = negated
 
     def __str__(self):
@@ -110,6 +126,5 @@ class ProblogSemantics(object):
             return ('prob', float(ast[0] + ast[1]))
 
     def query(self, ast):  # noqa
-        ast[1].negated = True
-        return ProbabilisticRule(None, body = [ast[1]])
+        return Query(ast[1])
 
