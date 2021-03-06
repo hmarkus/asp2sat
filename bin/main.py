@@ -631,6 +631,11 @@ if __name__ == "__main__":
     grounder.ground(control, program_str = program_str, program_files = program_files)
     program = Program(control)
 
+    logger.info("   Stats Original")
+    logger.info("------------------------------------------------------------")
+    program._generatePrimalGraph()
+    program._decomposeGraph()
+
     program.preprocess()
     logger.info("   Preprocessing Done")
     logger.info("------------------------------------------------------------")
