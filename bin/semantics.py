@@ -50,15 +50,12 @@ class Query(object):
 
 
 class Atom(object):
-    def __init__(self, predicate, inputs = None, negated = False):
+    def __init__(self, predicate, inputs = None):
         self.predicate = predicate
         self.inputs = inputs if inputs is not None else []
-        self.negated = negated
 
     def __str__(self):
         res = ""
-        if self.negated:
-            res += "not "
         res += f"{self.predicate}"
         if len(self.inputs) > 0:
             res += f"({','.join(self.inputs)})"
@@ -69,7 +66,18 @@ class ProblogSemantics(object):
         return ast
 
     def program(self, ast):  # noqa
-        return ast
+        new_program = []
+        for rule in ast:
+            # this ensures that all guesses are unconditional
+            if not rule.is_query() and rule.probability is not None and len(rule.body) > 0:
+                # make a new unconditional guess
+                head = Atom(f"aux_{rule.head.predicate}", inputs = rule.head.inputs)
+                guess_rule = ProbabilisticRule(head, [], rule.probability)
+                actual_rule = ProbabilisticRule(rule.head, rule.body + [head], None)
+                new_program += [guess_rule, actual_rule]
+            else:
+                new_program.append(rule)
+        return new_program
 
     def rule(self, ast):  # noqa
         prob = None

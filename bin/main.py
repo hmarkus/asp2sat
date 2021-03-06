@@ -355,6 +355,8 @@ class Program(object):
                 exit(-1)
 
     def clark_completion(self):
+        self._generatePrimalGraph()
+        self._decomposeGraph()
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
@@ -388,7 +390,7 @@ class Program(object):
 
     def _decomposeGraph(self):
         # Run htd
-        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr", "--child-limit", "2"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
         p.stdin.close()
         tdr = reader.TdReader.from_stream(p.stdout)
@@ -530,76 +532,6 @@ class Program(object):
         td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
             
-    def main(self, clingo_control, files):
-
-        start = time.time()
-
-        #time.sleep(2)
-        """
-        Entry point of the application registering the propagator and
-        implementing the standard ground and solve functionality.
-        """
-        if not files:
-            files = ["-"]
-
-        self.control = clingoext.Control()
-
-        for path in files:
-            self.control.add("base", [], self._read(path))
-
-        self.control.ground()
-
-        logger.info("------------------------------------------------------------")
-        logger.info("   Grounded Program")
-        logger.info("------------------------------------------------------------")
-        #pprint(self.control.ground_program.objects)
-        logger.info("------------------------------------------------------------")
-        logger.info(self.control.ground_program)
-        logger.info("------------------------------------------------------------")
-
-        self._normalize()
-
-        self.preprocess()
-        #cProfile.run('self.treeprocess()')
-        logger.info("   Preprocessing Done")
-        logger.info("------------------------------------------------------------")
-        
-        with open('out.lp', mode='wb') as file_out:
-            self.write_prog(file_out)
-        #self.clark_completion()
-        logger.info("   Stats translation")
-        logger.info("------------------------------------------------------------")
-        self.td_guided_clark_completion()
-        #self.kCNF(3)
-        #parser = wfParse.WeightedFormulaParser()
-        #sem = wfParse.WeightedFormulaSemantics(self)
-        #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
-        #parser.parse(wf, semantics = sem)
-        #self.kCNF(10)
-        with open('out.cnf', mode='wb') as file_out:
-            self.write_dimacs(file_out)
-        logger.info("   Stats CNF")
-        logger.info("------------------------------------------------------------")
-
-        end = time.time()
-
-        print("PREPROCESSING: " + str(end - start))
-        return
-
-        self.encoding_stats()
-        logger.info("   Stats Circuit")
-        logger.info("------------------------------------------------------------")
-        circ = stats.Circuit(self._program, self._deriv, self._guess)
-        circ.simp()
-        circ.tw(opt = True)
-        with open('out.dot', mode='wb') as file_out:
-            circ.to_dot(file_out)
-        with open('out_simp.cnf', mode='wb') as file_out:
-            circ.to_cnf(file_out)
-        logger.info("   Stats Simplified CNF")
-        logger.info("------------------------------------------------------------")
-        stats.encoding_stats('out_simp.cnf')
-
 if __name__ == "__main__":
     control = clingoext.Control()
     mode = sys.argv[1]
@@ -635,6 +567,7 @@ if __name__ == "__main__":
     logger.info("------------------------------------------------------------")
     program._generatePrimalGraph()
     program._decomposeGraph()
+    logger.info("------------------------------------------------------------")
 
     program.preprocess()
     logger.info("   Preprocessing Done")
@@ -646,7 +579,8 @@ if __name__ == "__main__":
     logger.info("------------------------------------------------------------")
     #program.clark_completion()
     program.td_guided_clark_completion()
-    
+    logger.info("------------------------------------------------------------")
+
     #print(weight_list)
     #program.kCNF(3)
     #parser = wfParse.WeightedFormulaParser()
@@ -659,6 +593,7 @@ if __name__ == "__main__":
     logger.info("   Stats CNF")
     logger.info("------------------------------------------------------------")
     program.encoding_stats()
+    logger.info("------------------------------------------------------------")
     p = subprocess.Popen([os.path.join(src_path, "minic2d/bin/miniC2D"), "-c", "out.cnf"], stdout=subprocess.PIPE)
     p.wait()
     import circuit
