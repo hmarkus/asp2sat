@@ -1,6 +1,7 @@
 import queue
 import sys
 import numpy as np
+import copy
 
 class Node(object):
     AND = 0
@@ -34,17 +35,20 @@ class Circuit(object):
             line = line.strip().split()
             if line[0] == 'L':
                 node = self.literals[2*(abs(int(line[1]))-1) + (1 if int(line[1]) < 0 else 0)]
-                self.nodes.append(node)
+                node.vars = set([abs(int(line[1]))])
             elif line[0] == 'A':
                 node = Node(Node.AND, idx, children = [self.nodes[int(x)] for x in line[2:]])
+                node.vars = set()
                 for child in node.children:
                     child.ancestors.append(node)
-                self.nodes.append(node)
+                    node.vars.update(child.vars)
             elif line[0] == 'O':
                 node = Node(Node.OR, idx, children = [self.nodes[int(x)] for x in line[3:]])
+                node.vars = set()
                 for child in node.children:
                     child.ancestors.append(node)
-                self.nodes.append(node)
+                    node.vars.update(child.vars)
+            self.nodes.append(node)
             idx += 1
 
     def wmc(self, weights):
@@ -71,8 +75,13 @@ class Circuit(object):
             elif node.type == Node.OR:
                 value = np.full(len(weights[0]), 0.0)
                 for child in node.children:
-                    value += child.weight
+                    to_add = copy.deepcopy(child.weight)
+                    for i in node.vars.difference(child.vars):
+                        to_add *= self.literals[(i-1)*2].weight + self.literals[(i-1)*2 + 1].weight
+                    value += to_add
                 node.weight = value
+        for i in set(range(1, 1 + len(self.literals)//2)).difference(node.vars):
+            node.weight *= self.literals[(i-1)*2].weight + self.literals[(i-1)*2 + 1].weight
         return node.weight
 
 
