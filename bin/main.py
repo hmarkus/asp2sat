@@ -166,7 +166,8 @@ class Program(object):
             for a in r.head:
                 ins[a].add(r)
             for b in r.body:
-                outs[abs(b)].add(r)
+                if b > 0:
+                    outs[b].add(r)
         ts = nx.topological_sort(self._condensation)
         ancs = {}
         for t in ts:
@@ -198,8 +199,9 @@ class Program(object):
                 new_r = Rule(head,r.body)
                 ins[new_v].add(new_r)
                 for b in r.body:
-                    outs[abs(b)].remove(r)
-                    outs[abs(b)].add(new_r)
+                    if b > 0:
+                        outs[b].remove(r)
+                        outs[b].add(new_r)
 
             # this contains all rules that use v and derive anc
             to_rem = outs[old_v].intersection(ins[anc])
@@ -208,17 +210,18 @@ class Program(object):
             outs[old_v] = outs[old_v].difference(ins[anc])
             # any rule that uses v to derive anc must use new_v
             for r in to_rem:
-                body = [(abs(b) if abs(b) != old_v else new_v)*(1 if b > 0 else -1) for b in r.body]
+                body = [ (b if b != old_v else new_v) for b in r.body]
                 new_r = Rule(r.head,body)
                 for b in r.head:
                     ins[b].remove(r)
                     ins[b].add(new_r)
                 for b in r.body:
-                    if abs(b) != old_v:
-                        outs[abs(b)].remove(r)
-                        outs[abs(b)].add(new_r)
-                    else:
-                        outs[new_v].add(new_r)
+                    if b > 0:
+                        if b != old_v:
+                            outs[abs(b)].remove(r)
+                            outs[abs(b)].add(new_r)
+                        else:
+                            outs[new_v].add(new_r)
             new_r = Rule([old_v], [new_v])
             ins[old_v].add(new_r)
             outs[new_v].add(new_r)
@@ -269,19 +272,20 @@ class Program(object):
             copies[a][len(backdoor)] = a
 
         def getAtom(atom, i):
-            var = abs(atom)
-            if var not in comp:
+            if atom < 0:
+                return atom
+            if atom not in comp:
                 return atom
             if i < 0:
                 print("this should not happen")
                 exit(-1)
-            if var not in copies:
+            if atom not in copies:
                 print("this should not happen")
                 exit(-1)
-            if i not in copies[var]:
-                copies[var][i] = self.copy_var(var)
-                self._deriv.add(copies[var][i])
-            return copies[var][i] if atom > 0 else -copies[var][i]
+            if i not in copies[atom]:
+                copies[atom][i] = self.copy_var(atom)
+                self._deriv.add(copies[atom][i])
+            return copies[atom][i]
 
         toAdd = set()
         for a in backdoor:
@@ -292,13 +296,13 @@ class Program(object):
                         # in the first iteration we do not add rules that use atoms from the backdoor
                         add = True
                         for x in r.body:
-                            if abs(x) in backdoor:
+                            if x > 0 and x in backdoor:
                                 add = False
                     else:
                         # in all but the first iteration we only use rules that use at least one atom from the SCC we are in
                         add = False
                         for x in r.body:
-                            if abs(x) in comp:
+                            if x > 0 and x in comp:
                                 add = True
                     if add:
                         body = [getAtom(x, i - 1) for x in r.body]
@@ -315,13 +319,13 @@ class Program(object):
                         # in the first iteration we only add rules that only use atoms from outside 
                         add = True
                         for x in r.body:
-                            if abs(x) in backdoor:
+                            if x > 0 and x in backdoor:
                                 add = False
                     else:
                         # in all other iterations we only use rules that use at least one atom from the SCC we are in
                         add = False
                         for x in r.body:
-                            if abs(x) in comp:
+                            if x >  0 and x in comp:
                                 add = True
                     if add:
                         body = [getAtom(x, i) for x in r.body]
