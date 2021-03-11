@@ -114,6 +114,12 @@ class Program(object):
         self._program = trans_prog
         self._deriv = set(range(1,self._max + 1)).difference(self._guess)
 
+    def magic_set(self, queries):
+        self._computeComponents()
+        used = set()
+        for q in queries:
+            used.update(nx.ancestors(self.dep, q))
+        print(len(used))
 
     def primalGraph(self):
         return self._graph
@@ -555,6 +561,7 @@ if __name__ == "__main__":
                 program_str += file_.read()
         parser = ProblogParser()
         program = parser.parse(program_str, semantics = ProblogSemantics())
+
         queries = [ r for r in program if r.is_query() ]
         program = [ r for r in program if not r.is_query() ]
 
@@ -566,6 +573,13 @@ if __name__ == "__main__":
         program_files = []
     grounder.ground(control, program_str = program_str, program_files = program_files)
     program = Program(control)
+
+    #if mode == "problog":
+    #    varMap = { name : var for  var, name in program._nameMap.items() }
+    #    qs = [ varMap[str(query.atom)] for query in queries ]
+    #    program.magic_set(qs)
+
+
 
     logger.info("   Stats Original")
     logger.info("------------------------------------------------------------")

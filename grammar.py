@@ -38,7 +38,7 @@ GRAMMAR = '''
 
     term 
         =
-        /[a-zA-Z0-9]*/
+        /[a-zA-Z0-9'"]*/
         ;
 
     probability
@@ -55,6 +55,6 @@ GRAMMAR = '''
 '''
 
 
-with open('bin/problog/parser.py', mode='wb') as file_out:
+with open('parser.py', mode='wb') as file_out:
     file_out.write(tatsu.to_python_sourcecode(GRAMMAR).encode())
 

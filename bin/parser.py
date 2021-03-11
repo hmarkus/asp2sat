@@ -49,7 +49,6 @@ class ProblogBuffer(Buffer):
             **kwargs
         )
 
-
 class ProblogParser(Parser):
     def __init__(
         self,
@@ -141,7 +140,7 @@ class ProblogParser(Parser):
 
     @tatsumasu()
     def _term_(self):  # noqa
-        self._pattern('[a-zA-Z0-9.]*')
+        self._pattern('[a-zA-Z0-9\'"]*')
 
     @tatsumasu()
     def _probability_(self):  # noqa
@@ -160,8 +159,6 @@ class ProblogParser(Parser):
         self._token('query(')
         self._atom_()
         self._token(').')
-
-
 
 
 def main(filename, start=None, **kwargs):

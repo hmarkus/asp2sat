@@ -53,6 +53,7 @@ class Atom(object):
     def __init__(self, predicate, inputs = None):
         self.predicate = predicate
         self.inputs = inputs if inputs is not None else []
+        self.inputs = [ x.replace("'", '"') for x in inputs ]
 
     def __str__(self):
         res = ""
