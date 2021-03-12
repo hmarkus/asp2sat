@@ -253,8 +253,8 @@ class Program(object):
         comp = self._condensation.nodes[idx]["members"]
         c = backdoor.ClingoControl(self.write_scc(comp))
         res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
-        print("backdoor comp: " + len(comp))
-        print("backdoor res: " + len(res))
+        print("backdoor comp: " + str(len(comp)))
+        print("backdoor res: " + str(len(res)))
         #local_dep = self.dep.subgraph(comp)
         #nx.draw(local_dep)
         #plt.show()
