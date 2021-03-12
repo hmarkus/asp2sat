@@ -252,7 +252,8 @@ class Program(object):
         comp = self._condensation.nodes[idx]["members"]
         c = backdoor.ClingoControl(self.write_scc(comp))
         res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
-        #print(res)
+        print("backdoor comp: " + len(comp))
+        print("backdoor res: " + len(res))
         #local_dep = self.dep.subgraph(comp)
         #nx.draw(local_dep)
         #plt.show()
@@ -611,6 +612,7 @@ if __name__ == "__main__":
     logger.info("   Stats CNF")
     logger.info("------------------------------------------------------------")
     program.encoding_stats()
+    exit(0)
     logger.info("------------------------------------------------------------")
     p = subprocess.Popen([os.path.join(src_path, "minic2d/bin/miniC2D"), "-c", "out.cnf"], stdout=subprocess.PIPE)
     p.wait()
