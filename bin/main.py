@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.realpath(os.path.join(src_path, '../..')))
 
 src_path = os.path.realpath(os.path.join(src_path, '../../lib'))
 
-libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd', 'minic2d']
+libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd', 'minic2d', 'c2d']
 
 if src_path not in sys.path:
     for lib in libs:
@@ -529,7 +529,6 @@ class Program(object):
     def write_prog(self, stream):
         stream.write(self.prog_string(self._program, False).encode())
 
-
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -612,10 +611,9 @@ if __name__ == "__main__":
     logger.info("------------------------------------------------------------")
     program.encoding_stats()
     logger.info("------------------------------------------------------------")
-    p = subprocess.Popen([os.path.join(src_path, "minic2d/bin/miniC2D"), "-c", "out.cnf"], stdout=subprocess.PIPE)
+    p = subprocess.Popen([os.path.join(src_path, "c2d/bin/c2d_linux"), "-smooth_all", "-reduce", "-in", "out.cnf"], stdout=subprocess.PIPE)
     p.wait()
     import circuit
-    circ = circuit.Circuit("out.cnf.nnf")
     if mode == "asp":
         weight_list = [ np.array([1.0]) for _ in range(program._max*2) ]
     elif mode == "problog":
@@ -630,7 +628,8 @@ if __name__ == "__main__":
             weight_list[(varMap[atom]-1)*2 + 1][i] = 0.0
     logger.info("   Results")
     logger.info("------------------------------------------------------------")
-    results = circ.wmc(weight_list)
+    #circ = circuit.Circuit("out.cnf.nnf")
+    results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list)
     if mode == "asp":
         logger.info(f"The program has {int(results[0])} models")
     elif mode == "problog":
