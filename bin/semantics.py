@@ -107,7 +107,7 @@ class ProblogSemantics(object):
         return atoms
 
     def atom(self, ast):  # noqa
-        if type(ast) == tuple:
+        if type(ast) == tuple or type(ast) == list:
             predicate = ast[0]
             inputs = ast[2]
         else:

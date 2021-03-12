@@ -48,7 +48,8 @@ import wfParse
 import backdoor
 import stats
 import grounder
-from parser import ProblogParser, ProblogSemantics
+from parser import ProblogParser
+from semantics import ProblogSemantics
 
 class Rule(object):
     def __init__(self, head, body):
