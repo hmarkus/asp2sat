@@ -398,12 +398,12 @@ class Program(object):
         for r in self._program:
             atoms = set(r.head)
             atoms.update(tuple(map(abs, r.body)))
-            self._graph.add_hyperedge(tuple(atoms))
+            self._graph.add_hyperedge(tuple(atoms), checkSubsumes = not self.no_sub)
 
     def _decomposeGraph(self):
         # Run htd
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr", "--child-limit", "2"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw", print_id = False)
         p.stdin.close()
         tdr = reader.TdReader.from_stream(p.stdout)
         p.wait()
@@ -547,6 +547,11 @@ if __name__ == "__main__":
     control = clingoext.Control()
     mode = sys.argv[1]
     weights = {}
+    no_sub = False
+    if sys.argv[2] == "-no_subset_check":
+        logger.info("   Not performing subset check when adding edges to hypergraph.")
+        no_sub = True
+        del sys.argv[2]
     if mode == "asp":
         program_files = sys.argv[2:]
         program_str = None
@@ -574,6 +579,7 @@ if __name__ == "__main__":
         program_files = []
     grounder.ground(control, program_str = program_str, program_files = program_files)
     program = Program(control)
+    program.no_sub = no_sub
 
     #if mode == "problog":
     #    varMap = { name : var for  var, name in program._nameMap.items() }
