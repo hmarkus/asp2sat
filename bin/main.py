@@ -557,7 +557,7 @@ if __name__ == "__main__":
         program_str = None
         if not program_files:
             program_str = sys.stdin.read()
-    elif mode == "problog":
+    elif mode.startswith("problog"):
         files = sys.argv[2:]
         program_str = ""
         if not files:
@@ -618,14 +618,15 @@ if __name__ == "__main__":
     logger.info("   Stats CNF")
     logger.info("------------------------------------------------------------")
     program.encoding_stats()
-    exit(0)
+    if mode != "problogwmc":
+        exit(0)
     logger.info("------------------------------------------------------------")
     p = subprocess.Popen([os.path.join(src_path, "c2d/bin/c2d_linux"), "-smooth_all", "-reduce", "-in", "out.cnf"], stdout=subprocess.PIPE)
     p.wait()
     import circuit
     if mode == "asp":
         weight_list = [ np.array([1.0]) for _ in range(program._max*2) ]
-    elif mode == "problog":
+    elif mode.startswith("problog"):
         query_cnt = len(queries)
         varMap = { name : var for  var, name in program._nameMap.items() }
         weight_list = [ np.full(query_cnt, 1.0) for _ in range(program._max*2) ]
@@ -641,7 +642,7 @@ if __name__ == "__main__":
     results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list)
     if mode == "asp":
         logger.info(f"The program has {int(results[0])} models")
-    elif mode == "problog":
+    elif mode.startswith("problog"):
         for i, query in enumerate(queries):
             atom = str(query.atom)
             logger.info(f"{atom}: {' '*max(1,(20 - len(atom)))}{results[i]}")
