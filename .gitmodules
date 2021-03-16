@@ -1,6 +1,6 @@
 [submodule "lib/htd_validate"]
 	path = lib/htd_validate
-	url = git@github.com:raki123/htd_validate.git
+	url = https://github.com/raki123/htd_validate
 [submodule "lib/nesthdb"]
 	path = lib/nesthdb
 	url = https://github.com/hmarkus/dp_on_dbs/
