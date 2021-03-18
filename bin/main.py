@@ -183,6 +183,7 @@ class Program(object):
         ancs = {}
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
+            print(comp)
             for v in comp:
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
         q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
@@ -195,9 +196,10 @@ class Program(object):
             ins[new_v] = set()
             outs[new_v] = set()
             anc = ancs[old_v].pop()
-            ancs[anc].remove(old_v)
-            if len(ancs[anc]) == 1:
-                q.add(anc)
+            if old_v in ancs[anc]:
+                ancs[anc].remove(old_v)
+                if len(ancs[anc]) == 1:
+                    q.add(anc)
 
             # this contains all rules that do not use anc to derive v
             to_rem = ins[old_v].difference(outs[anc])
