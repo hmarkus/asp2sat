@@ -51,10 +51,14 @@ import grounder
 from parser import ProblogParser
 from semantics import ProblogSemantics
 
+
 class Rule(object):
     def __init__(self, head, body):
         self.head = head
         self.body = body
+
+    def __repr__(self):
+        return "; ".join([str(a) for a in self.head]) + ":- " + ", ".join([ ("not " if b < 0 else "") + str(abs(b)) for b in self.body]) 
 
 class Program(object):
     def __init__(self, clingo_control):
@@ -232,9 +236,8 @@ class Program(object):
             new_r = Rule([old_v], [new_v])
             ins[old_v].add(new_r)
             outs[new_v].add(new_r)
-        #primitives = [r for r in self._program if set(r.body).issubset(self._guess)]
         constraints = [r for r in self._program if len(r.head) == 0]
-        trans_prog = constraints#primitives
+        trans_prog = constraints
         for a in ins.keys():
             trans_prog = trans_prog + list(ins[a])
         self._program = trans_prog
@@ -280,8 +283,10 @@ class Program(object):
             copies[a][len(backdoor)] = a
 
         def getAtom(atom, i):
+            # negated atoms are kept as they are
             if atom < 0:
                 return atom
+            # atoms that are not from this component are input atoms and should stay the same
             if atom not in comp:
                 return atom
             if i < 0:
@@ -367,8 +372,6 @@ class Program(object):
                 exit(-1)
 
     def clark_completion(self):
-        self._generatePrimalGraph()
-        self._decomposeGraph()
         perAtom = {}
         for a in self._deriv:
             perAtom[a] = []
@@ -413,27 +416,47 @@ class Program(object):
     def td_guided_clark_completion(self):
         self._generatePrimalGraph()
         self._decomposeGraph()
-        # maps a node t to a set of rules that need to be considered in t
-        perAtom = {}
-        for a in self._deriv:
-            perAtom[a] = []
+
+        # at which td node to handle each rule
+        rules = {}
+        # at which td node each variable occurs first
+        last = {}
+        tree = nx.DiGraph()
+        tree.add_nodes_from(range(len(self._td.nodes)))
+        idx = 0
+        td_idx = self._td.nodes
+        for t in self._td.nodes:
+            for a in t.vertices:
+                last[a] = idx
+            t.idx = idx
+            for tp in t.children:
+                tree.add_edge(t.idx, tp.idx)
+            idx += 1
+            rules[t] = []
+
+        
+        #import pydot
+        #from networkx.drawing.nx_pydot import graphviz_layout
+        #pos = graphviz_layout(tree, prog="dot")
+        #nx.draw(tree, pos = pos, with_labels=True)
+        #plt.show()
+        #for i in self._deriv:
+        #    print(i, last[i])
+        #for i in range(len(self._td.nodes)):
+        #    print(i, td_idx[i])
 
         for r in self._program:
             for a in r.head:
-                perAtom[a].append(r)
-
-        for head in self._deriv:
-            for r in perAtom[head]:
                 r.proven = self.new_var(f"{r}")
                 ands = [-x for x in r.body]
                 self._clauses.append([r.proven] + ands)
                 for at in ands:
                     self._clauses.append([-r.proven, -at])
+            idx = min([last[abs(b)] for b in r.body + r.head])
+            rules[td_idx[idx]].append(r)
 
         # how many rules have we used and what is the last used variable
         unfinished = {}
-        # temporary copy of the program, will be empty after the first pass
-        program = list(self._program)
         # first td pass: determine rules and prove_atoms
         for t in self._td.nodes:
             unfinished[t] = {}
@@ -456,9 +479,7 @@ class Program(object):
                     if a in unfinished[tp]:
                         to_handle[a].append(unfinished[tp][a])
             # take the rules we need and remove them
-            rules = [r for r in program if set(map(abs,r.head + r.body)).issubset(t.vertices)]
-            program = [r for r in program if not set(map(abs,r.head + r.body)).issubset(t.vertices)]
-            for r in rules:
+            for r in rules[t]:
                 for a in r.head:
                     to_handle[a].append(r.proven)
 
@@ -588,11 +609,11 @@ if __name__ == "__main__":
 
 
 
-    logger.info("   Stats Original")
-    logger.info("------------------------------------------------------------")
-    program._generatePrimalGraph()
-    program._decomposeGraph()
-    logger.info("------------------------------------------------------------")
+    #logger.info("   Stats Original")
+    #logger.info("------------------------------------------------------------")
+    #program._generatePrimalGraph()
+    #program._decomposeGraph()
+    #logger.info("------------------------------------------------------------")
 
     program.preprocess()
     logger.info("   Preprocessing Done")
@@ -600,9 +621,9 @@ if __name__ == "__main__":
     
     with open('out.lp', mode='wb') as file_out:
         program.write_prog(file_out)
+    #program.clark_completion()
     logger.info("   Stats translation")
     logger.info("------------------------------------------------------------")
-    #program.clark_completion()
     program.td_guided_clark_completion()
     logger.info("------------------------------------------------------------")
 
@@ -615,9 +636,9 @@ if __name__ == "__main__":
     with open('out.cnf', mode='wb') as file_out:
         program.write_dimacs(file_out)
 
-    logger.info("   Stats CNF")
-    logger.info("------------------------------------------------------------")
-    program.encoding_stats()
+    #logger.info("   Stats CNF")
+    #logger.info("------------------------------------------------------------")
+    #program.encoding_stats()
     if mode != "problogwmc":
         exit(0)
     logger.info("------------------------------------------------------------")
