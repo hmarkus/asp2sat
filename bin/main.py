@@ -72,6 +72,8 @@ class Program(object):
         self._deriv = set()
         self._copies = {}
         self._normalize(clingo_control)
+        #for r in self._program:
+        #    print("; ".join([self._nameMap[a] for a in r.head]) + ":- " + ", ".join([ ("not " if b < 0 else "") + self._nameMap[abs(b)] for b in r.body]))
 
     def remove_tautologies(self, clingo_control):
         tmp = []
@@ -183,7 +185,6 @@ class Program(object):
         ancs = {}
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
-            print(comp)
             for v in comp:
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
         q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
@@ -241,7 +242,7 @@ class Program(object):
         constraints = [r for r in self._program if len(r.head) == 0]
         trans_prog = constraints
         for a in ins.keys():
-            trans_prog = trans_prog + list(ins[a])
+            trans_prog += list(ins[a])
         self._program = trans_prog
 
 
@@ -256,8 +257,33 @@ class Program(object):
 
     def compute_backdoor(self, idx):
         comp = self._condensation.nodes[idx]["members"]
-        c = backdoor.ClingoControl(self.write_scc(comp))
-        res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
+        local_dep = self.dep.subgraph(comp)
+        if len(comp) > 10:
+            basis = nx.cycle_basis(local_dep.to_undirected())
+            res = []
+            while len(basis) > 0:
+                prog = "\n".join([f"p({v})." for v in comp if v not in res]) + "\n"
+                for c in basis:
+                    prog += ":-" + ", ".join([f"not abs({v})" for v in c]) + ".\n"
+                c = backdoor.ClingoControl(prog)
+                res += c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_backdoor.lp")[2][0]
+                local_dep = self.dep.subgraph([x for x in comp if x not in res])
+                basis = nx.cycle_basis(local_dep.to_undirected())
+        else:
+            try:
+                c = backdoor.ClingoControl(self.write_scc(comp))
+                res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
+            except:
+                basis = nx.cycle_basis(local_dep.to_undirected())
+                res = []
+                while len(basis) > 0:
+                    prog = "\n".join([f"p({v})." for v in comp if v not in res]) + "\n"
+                    for c in basis:
+                        prog += ":-" + ", ".join([f"not abs({v})" for v in c]) + ".\n"
+                    c = backdoor.ClingoControl(prog)
+                    res += c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_backdoor.lp")[2][0]
+                    local_dep = self.dep.subgraph([x for x in comp if x not in res])
+                    basis = nx.cycle_basis(local_dep.to_undirected())
         print("backdoor comp: " + str(len(comp)))
         print("backdoor res: " + str(len(res)))
         #local_dep = self.dep.subgraph(comp)
