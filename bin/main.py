@@ -183,11 +183,13 @@ class Program(object):
                     outs[b].add(r)
         ts = nx.topological_sort(self._condensation)
         ancs = {}
+        decs = {}
         for t in ts:
             comp = self._condensation.nodes[t]["members"]
             for v in comp:
                 ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
-        q = set([v for v in ancs.keys() if len(ancs[v]) == 1])
+                decs[v] = set([vp[1] for vp in self.dep.out_edges(nbunch=v) if vp[1] in comp])
+        q = set([v for v in ancs.keys() if len(ancs[v]) == 1 and len(decs[v]) == 1 and list(ancs[v])[0] == list(decs[v])[0]])
         while not len(q) == 0:
             old_v = q.pop()
             if len(ancs[old_v]) == 0:
@@ -197,10 +199,10 @@ class Program(object):
             ins[new_v] = set()
             outs[new_v] = set()
             anc = ancs[old_v].pop()
-            if old_v in ancs[anc]:
-                ancs[anc].remove(old_v)
-                if len(ancs[anc]) == 1:
-                    q.add(anc)
+            ancs[anc].remove(old_v)
+            decs[anc].remove(old_v)
+            if len(ancs[anc]) == 1 and len(decs[anc]) == 1 and list(ancs[anc])[0] == list(decs[anc])[0]:
+                q.add(anc)
 
             # this contains all rules that do not use anc to derive v
             to_rem = ins[old_v].difference(outs[anc])
