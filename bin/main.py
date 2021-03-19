@@ -99,7 +99,10 @@ class Program(object):
                 if len(o.body) > 0:
                     self._program.append(o)
                     for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
-                        _atomToVertex[a] = self.new_var(symbol_map[a])
+                        if a in symbol_map:
+                            _atomToVertex[a] = self.new_var(symbol_map[a])
+                        else:
+                            _atomToVertex[a] = self.new_var(f"projected_away({a})")
                         _vertexToAtom[self._max] = a
                 else:
                     if o.choice:
