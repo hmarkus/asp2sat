@@ -239,11 +239,11 @@ class Program(object):
             new_r = Rule([old_v], [new_v])
             ins[old_v].add(new_r)
             outs[new_v].add(new_r)
-        constraints = [r for r in self._program if len(r.head) == 0]
-        trans_prog = constraints
+        # only keep the constraints
+        self._program = [r for r in self._program if len(r.head) == 0]
+        # add all the other rules
         for a in ins.keys():
-            trans_prog += list(ins[a])
-        self._program = trans_prog
+            self._program.extend(ins[a])
 
 
     def write_scc(self, comp):
@@ -286,9 +286,6 @@ class Program(object):
                     basis = nx.cycle_basis(local_dep.to_undirected())
         print("backdoor comp: " + str(len(comp)))
         print("backdoor res: " + str(len(res)))
-        #local_dep = self.dep.subgraph(comp)
-        #nx.draw(local_dep)
-        #plt.show()
         return res
 
     def backdoor_process(self, comp, backdoor):
@@ -534,23 +531,6 @@ class Program(object):
         constraints = [r for r in self._program if len(r.head) == 0]
         for r in constraints:
             self._clauses.append([-x for x in r.body])
-
-    def kCNF(self, k):
-        if k <= 2:
-            print("We can only get kCNF for k >= 3")
-            exit(-1)
-        pc = []
-        for c in self._clauses:
-            while len(c) > k:
-                nv = self.new_var("")
-                nc = c[:k-1] + [nv]
-                pc.append(nc)
-                for i in range(k-1):
-                    pc.append([-c[i], -nv])
-                c = [-nv] + c[k-1:]
-            pc.append(c)
-        self._clauses = pc
-
 
     def write_dimacs(self, stream, debug = False):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
