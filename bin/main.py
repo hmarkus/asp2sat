@@ -264,7 +264,7 @@ class Program(object):
         comp = self._condensation.nodes[idx]["members"]
         local_dep = self.dep.subgraph(comp)
         try:
-            if len(comp) > 10:
+            if len(comp) > 100:
                 basis = nx.cycle_basis(local_dep.to_undirected())
                 res = []
                 while len(basis) > 0:
