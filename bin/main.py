@@ -586,9 +586,14 @@ if __name__ == "__main__":
     mode = sys.argv[1]
     weights = {}
     no_sub = False
+    no_pp = False
     if sys.argv[2] == "-no_subset_check":
         logger.info("   Not performing subset check when adding edges to hypergraph.")
         no_sub = True
+        del sys.argv[2]
+    elif sys.argv[2] == "-no_pp":
+        logger.info("   No Preprocessin")
+        no_pp = True
         del sys.argv[2]
     if mode == "asp":
         program_files = sys.argv[2:]
@@ -626,11 +631,16 @@ if __name__ == "__main__":
 
 
 
-    #logger.info("   Stats Original")
-    #logger.info("------------------------------------------------------------")
-    #program._generatePrimalGraph()
-    #program._decomposeGraph()
-    #logger.info("------------------------------------------------------------")
+    logger.info("   Stats Original")
+    logger.info("------------------------------------------------------------")
+    program._generatePrimalGraph()
+    program._decomposeGraph()
+    logger.info("------------------------------------------------------------")
+
+    if no_pp:
+        with open('out.lp', mode='wb') as file_out:
+            program.write_prog(file_out)
+            exit(0)
 
     program.preprocess()
     logger.info("   Preprocessing Done")
