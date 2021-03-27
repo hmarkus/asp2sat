@@ -122,11 +122,11 @@ class Circuit(object):
                 if line[0] == 'L':
                     val = weights[2*(abs(int(line[1]))-1) + (1 if int(line[1]) < 0 else 0)]
                 elif line[0] == 'A':
-                    val = np.full(len(weights[0]), one)
+                    val = np.full(len(weights[0]), one, dtype=object)
                     for x in line[2:]:
                         val *= mem[int(x)]
                 elif line[0] == 'O':
-                    val = np.full(len(weights[0]), zero)
+                    val = np.full(len(weights[0]), zero, dtype=object)
                     for x in line[3:]:
                         val += mem[int(x)]
                 mem.append(val)

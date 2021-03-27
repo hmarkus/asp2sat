@@ -16,6 +16,7 @@ import subprocess
 import math
 import queue
 import time
+import importlib
 # set library path
 #start = time.time()
 # TODO: fixme
@@ -123,13 +124,6 @@ class Program(object):
                 trans_prog.add(Rule(head,body))
         self._program = trans_prog
         self._deriv = set(range(1,self._max + 1)).difference(self._guess)
-
-    def magic_set(self, queries):
-        self._computeComponents()
-        used = set()
-        for q in queries:
-            used.update(nx.ancestors(self.dep, q))
-        print(len(used))
 
     def primalGraph(self):
         return self._graph
@@ -595,6 +589,12 @@ if __name__ == "__main__":
         logger.info("   No Preprocessin")
         no_pp = True
         del sys.argv[2]
+    if sys.argv[2] == "-semiring":
+        logger.info(f"   Using semiring {sys.argv[3]}.")
+        sr = sys.argv[3]
+        semiring = importlib.import_module(sr)
+        del sys.argv[2]
+        del sys.argv[2]
     if mode == "asp":
         program_files = sys.argv[2:]
         program_str = None
@@ -615,8 +615,8 @@ if __name__ == "__main__":
         program = [ r for r in program if not r.is_query() ]
 
         for r in program:
-            if r.probability is not None:
-                weights[str(r.head)] = float(r.probability)
+            if r.weight is not None:
+                weights[str(r.head)] = semiring.parse(r.weight)
 
         program_str = "".join([ r.asp_string() for r in program])
         program_files = []
@@ -677,17 +677,17 @@ if __name__ == "__main__":
     elif mode.startswith("problog"):
         query_cnt = len(queries)
         varMap = { name : var for  var, name in program._nameMap.items() }
-        weight_list = [ np.full(query_cnt, 1.0) for _ in range(program._max*2) ]
+        weight_list = [ np.full(query_cnt, semiring.one, dtype=object) for _ in range(program._max*2) ]
         for name in weights:
-            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name])
-            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, 1.0 - weights[name])
+            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name], dtype=object)
+            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, semiring.negate(weights[name]), dtype=object)
         for i, query in enumerate(queries):
             atom = str(query.atom)
-            weight_list[(varMap[atom]-1)*2 + 1][i] = 0.0
+            weight_list[(varMap[atom]-1)*2 + 1][i] = semiring.zero
     logger.info("   Results")
     logger.info("------------------------------------------------------------")
     #circ = circuit.Circuit("out.cnf.nnf")
-    results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list)
+    results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list, zero = semiring.zero, one = semiring.one)
     if mode == "asp":
         logger.info(f"The program has {int(results[0])} models")
     elif mode.startswith("problog"):
