@@ -61,6 +61,9 @@ class Rule(object):
     def __repr__(self):
         return "; ".join([str(a) for a in self.head]) + ":- " + ", ".join([ ("not " if b < 0 else "") + str(abs(b)) for b in self.body]) 
 
+class Semiring(object):
+    pass
+
 class Program(object):
     def __init__(self, clingo_control):
         # the variable counter
@@ -581,20 +584,27 @@ if __name__ == "__main__":
     weights = {}
     no_sub = False
     no_pp = False
-    if sys.argv[2] == "-no_subset_check":
+    if len(sys.argv) > 2 and sys.argv[2] == "-no_subset_check":
         logger.info("   Not performing subset check when adding edges to hypergraph.")
         no_sub = True
         del sys.argv[2]
-    elif sys.argv[2] == "-no_pp":
+    elif len(sys.argv) > 2 and sys.argv[2] == "-no_pp":
         logger.info("   No Preprocessin")
         no_pp = True
         del sys.argv[2]
-    if sys.argv[2] == "-semiring":
+    if len(sys.argv) > 2 and sys.argv[2] == "-semiring":
         logger.info(f"   Using semiring {sys.argv[3]}.")
         sr = sys.argv[3]
         semiring = importlib.import_module(sr)
         del sys.argv[2]
         del sys.argv[2]
+    else:
+        semiring = Semiring()
+        semiring.parse = float
+        semiring.one = 1.0
+        semiring.zero = 0.0
+        semiring.negate = lambda x : 1.0 - x
+        semiring.dtype = float
     if mode == "asp":
         program_files = sys.argv[2:]
         program_str = None
@@ -677,17 +687,17 @@ if __name__ == "__main__":
     elif mode.startswith("problog"):
         query_cnt = len(queries)
         varMap = { name : var for  var, name in program._nameMap.items() }
-        weight_list = [ np.full(query_cnt, semiring.one, dtype=object) for _ in range(program._max*2) ]
+        weight_list = [ np.full(query_cnt, semiring.one, dtype=semiring.dtype) for _ in range(program._max*2) ]
         for name in weights:
-            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name], dtype=object)
-            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, semiring.negate(weights[name]), dtype=object)
+            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name], dtype=semiring.dtype)
+            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, semiring.negate(weights[name]), dtype=semiring.dtype)
         for i, query in enumerate(queries):
             atom = str(query.atom)
             weight_list[(varMap[atom]-1)*2 + 1][i] = semiring.zero
     logger.info("   Results")
     logger.info("------------------------------------------------------------")
     #circ = circuit.Circuit("out.cnf.nnf")
-    results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list, zero = semiring.zero, one = semiring.one)
+    results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list, zero = semiring.zero, one = semiring.one, dtype = semiring.dtype)
     if mode == "asp":
         logger.info(f"The program has {int(results[0])} models")
     elif mode.startswith("problog"):
