@@ -600,7 +600,9 @@ if __name__ == "__main__":
         del sys.argv[2]
     else:
         semiring = Semiring()
-        semiring.parse = float
+        def float_parse(f, atom = None):
+            return float(f)
+        semiring.parse = float_parse
         semiring.one = 1.0
         semiring.zero = 0.0
         semiring.negate = lambda x : 1.0 - x
@@ -626,7 +628,7 @@ if __name__ == "__main__":
 
         for r in program:
             if r.weight is not None:
-                weights[str(r.head)] = semiring.parse(r.weight)
+                weights[str(r.head)] = semiring.parse(r.weight, atom = r.head)
 
         program_str = "".join([ r.asp_string() for r in program])
         program_files = []

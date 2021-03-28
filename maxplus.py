@@ -17,7 +17,7 @@ class MaxPlusFloat(object):
     def __str__(self):
         return str(self.value)
 
-def parse(value):
+def parse(value, atom = None):
     return MaxPlusFloat(float(value))
 
 def negate(value):
