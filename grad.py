@@ -25,9 +25,9 @@ class Gradient(object):
 
 def parse(value, atom = None):
     global first
-    if first == None:
+    if first is None:
         first = atom
-    if atom == first:
+    if atom is first:
         return Gradient((float(value), 1.0))
     else:
         return Gradient((float(value), 0.0))
