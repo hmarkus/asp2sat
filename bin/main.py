@@ -1,32 +1,30 @@
+#!/home/hecher/miniconda3/bin/python3
+##/usr/bin/env python3
+
 """
 Main module providing the application logic.
 """
 
+import matplotlib.pyplot as plt
+import numpy as np
 import sys
-# from textwrap import dedent
-from collections import OrderedDict
-import clingo
-#import clingoext
-from pprint import pprint
-#import networkx as nx
-#import lib.htd_validate
-#from groundprogram import ClingoRule
+import networkx as nx
 import os
 import inspect
 import logging
 import subprocess
 import math
-from itertools import product
-
+import queue
+import time
 # set library path
-
+#start = time.time()
 # TODO: fixme
 src_path = os.path.abspath(os.path.realpath(inspect.getfile(inspect.currentframe())))
 sys.path.insert(0, os.path.realpath(os.path.join(src_path, '../..')))
 
 src_path = os.path.realpath(os.path.join(src_path, '../../lib'))
 
-libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd']
+libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd', 'minic2d', 'c2d']
 
 if src_path not in sys.path:
     for lib in libs:
@@ -40,328 +38,519 @@ from htd_validate.utils import hypergraph, graph
 
 import clingoext
 from clingoext import ClingoRule
-#from htd_validate.decompositions import *
 from dpdb import reader
 from dpdb import treedecomp
 from dpdb.problems.sat_util import *
 from dpdb.writer import StreamWriter
+import tempfile
 
 import wfParse
-
-class AppConfig(object):
-    """
-    Class for application specific options.
-    """
-
-    def __init__(self):
-        self.eclingo_verbose = 0
+import backdoor
+import stats
+import grounder
+from parser import ProblogParser
+from semantics import ProblogSemantics
 
 
-class Application(object):
-    """
-    Application class that can be used with `clingo.clingo_main` to solve CSP
-    problems.
-    """
+class Rule(object):
+    def __init__(self, head, body):
+        self.head = head
+        self.body = body
 
-    def __init__(self):
-        self.program_name = "clingoext"
-        self.version = "0.0.1"
-        self.config = AppConfig()
-        self._weights = {}
+    def __repr__(self):
+        return "; ".join([str(a) for a in self.head]) + ":- " + ", ".join([ ("not " if b < 0 else "") + str(abs(b)) for b in self.body]) 
 
-    def _read(self, path):
-        if path == "-":
-            return sys.stdin.read()
-        with open(path) as file_:
-            return file_.read()
+class Program(object):
+    def __init__(self, clingo_control):
+        # the variable counter
+        self._max = 0
+        self._nameMap = {}
+        # store the clauses here
+        self._clauses = []
+        # remember which variables are guesses and which are derived
+        self._guess = set()
+        self._deriv = set()
+        self._copies = {}
+        self._normalize(clingo_control)
+        #for r in self._program:
+        #    print("; ".join([self._nameMap[a] for a in r.head]) + ":- " + ", ".join([ ("not " if b < 0 else "") + self._nameMap[abs(b)] for b in r.body]))
+
+    def remove_tautologies(self, clingo_control):
+        tmp = []
+        for o in clingo_control.ground_program.objects:
+            if isinstance(o, ClingoRule) and set(o.head).intersection(set(o.body)) == set():
+                tmp.append(o)
+        return tmp
+
+    def _normalize(self, clingo_control):
+        program = self.remove_tautologies(clingo_control)
+        self._program = []
+        _atomToVertex = {} # htd wants succinct numbering of vertices / no holes
+        _vertexToAtom = {} # inverse mapping of _atomToVertex 
+        unary = []
+
+        symbol_map = {}
+        for sym in clingo_control.symbolic_atoms:
+            symbol_map[sym.literal] = str(sym.symbol)
+        for o in program:
+            if isinstance(o, ClingoRule):
+                o.atoms = set(o.head)
+                o.atoms.update(tuple(map(abs, o.body)))
+                if len(o.body) > 0:
+                    self._program.append(o)
+                    for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
+                        if a in symbol_map:
+                            _atomToVertex[a] = self.new_var(symbol_map[a])
+                        else:
+                            _atomToVertex[a] = self.new_var(f"projected_away({a})")
+                        _vertexToAtom[self._max] = a
+                else:
+                    if o.choice:
+                        unary.append(o)
+        for o in unary:
+            self._program.append(o)
+            for a in o.atoms.difference(_atomToVertex):	# add mapping for atom not yet mapped
+                _atomToVertex[a] = self.new_var(symbol_map[a])
+                _vertexToAtom[self._max] = a
+
+        trans_prog = set()
+        for r in self._program:
+            if r.choice: 
+                self._guess.add(_atomToVertex[r.head[0]])
+            else:
+                head = list(map(lambda x: _atomToVertex[x], r.head))
+                body = list(map(lambda x: _atomToVertex[abs(x)]*(1 if x > 0 else -1), r.body))
+                trans_prog.add(Rule(head,body))
+        self._program = trans_prog
+        self._deriv = set(range(1,self._max + 1)).difference(self._guess)
 
     def primalGraph(self):
         return self._graph
 
-    def var2idx(self, var):
-        sym = clingo.parse_term(var)
-        if sym in self.control.symbolic_atoms:
-            lit = self.control.symbolic_atoms[sym].literal
-            return self._atomToVertex[lit]
-        return 0
-
     def new_var(self, name):
         self._max += 1
-        self._nameMap[self._max] = name
+        self._nameMap[self._max] = name if name != "" else str(self._max)
         return self._max
+
+    def copy_var(self, var):
+        if "(" in self._nameMap[var]:
+            idx = self._nameMap[var].index("(")
+            inputs = self._nameMap[var][idx:]
+        else:
+            inputs = ""
+        if "_copy_" in self._nameMap[var]:
+            idx = self._nameMap[var].index("_copy_")
+            pred = self._nameMap[var][:idx]
+        else:
+            pred = self._nameMap[var]
+            if "(" in pred:
+                idx = pred.index("(")
+                pred = pred[:idx]
+            if pred+inputs not in self._copies:
+                self._copies[pred+inputs] = [var]
+        cnt = len(self._copies[pred+inputs])
+        name = pred + "_copy_" + str(cnt) + inputs
+        nv = self.new_var(name)
+        self._copies[pred+inputs].append(nv)
+        return nv
+
+    def _computeComponents(self):
+        self.dep = nx.DiGraph()
+        for r in self._program:
+            for a in r.head:
+                for b in r.body:
+                    if b > 0:
+                        self.dep.add_edge(b, a)
+        comp = nx.algorithms.strongly_connected_components(self.dep)
+        self._components = list(comp)
+        self._condensation = nx.algorithms.condensation(self.dep, self._components)
+
+    def treeprocess(self):
+        ins = {}
+        outs = {}
+        for a in self._deriv.union(self._guess):
+            ins[a] = set()
+            outs[a] = set()
+        for r in self._program:
+            for a in r.head:
+                ins[a].add(r)
+            for b in r.body:
+                if b > 0:
+                    outs[b].add(r)
+        ts = nx.topological_sort(self._condensation)
+        ancs = {}
+        decs = {}
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            for v in comp:
+                ancs[v] = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
+                decs[v] = set([vp[1] for vp in self.dep.out_edges(nbunch=v) if vp[1] in comp])
+        q = set([v for v in ancs.keys() if len(ancs[v]) == 1 and len(decs[v]) == 1 and list(ancs[v])[0] == list(decs[v])[0]])
+        while not len(q) == 0:
+            old_v = q.pop()
+            if len(ancs[old_v]) == 0:
+                continue
+            new_v = self.copy_var(old_v)
+            self._deriv.add(new_v)
+            ins[new_v] = set()
+            outs[new_v] = set()
+            anc = ancs[old_v].pop()
+            ancs[anc].remove(old_v)
+            decs[anc].remove(old_v)
+            if len(ancs[anc]) == 1 and len(decs[anc]) == 1 and list(ancs[anc])[0] == list(decs[anc])[0]:
+                q.add(anc)
+
+            # this contains all rules that do not use anc to derive v
+            to_rem = ins[old_v].difference(outs[anc])
+            # this contains all rules that use anc to derive v
+            # we just keep them as they are
+            ins[old_v] = ins[old_v].intersection(outs[anc])
+            # any rule that does not use anc to derive v can now only derive new_v
+            for r in to_rem:
+                head = [b if b != old_v else new_v for b in r.head]
+                new_r = Rule(head,r.body)
+                ins[new_v].add(new_r)
+                for b in r.body:
+                    if b > 0:
+                        outs[b].remove(r)
+                        outs[b].add(new_r)
+
+            # this contains all rules that use v and derive anc
+            to_rem = outs[old_v].intersection(ins[anc])
+            # this contains all rules that use v and do not derive anc
+            # we just keep them as they are
+            outs[old_v] = outs[old_v].difference(ins[anc])
+            # any rule that uses v to derive anc must use new_v
+            for r in to_rem:
+                body = [ (b if b != old_v else new_v) for b in r.body]
+                new_r = Rule(r.head,body)
+                for b in r.head:
+                    ins[b].remove(r)
+                    ins[b].add(new_r)
+                for b in r.body:
+                    if b > 0:
+                        if b != old_v:
+                            outs[abs(b)].remove(r)
+                            outs[abs(b)].add(new_r)
+                        else:
+                            outs[new_v].add(new_r)
+            new_r = Rule([old_v], [new_v])
+            ins[old_v].add(new_r)
+            outs[new_v].add(new_r)
+        # only keep the constraints
+        self._program = [r for r in self._program if len(r.head) == 0]
+        # add all the other rules
+        for a in ins.keys():
+            self._program.extend(ins[a])
+
+
+    def write_scc(self, comp):
+        res = ""
+        for v in comp:
+            res += f"p({v}).\n"
+            ancs = set([vp[0] for vp in self.dep.in_edges(nbunch=v) if vp[0] in comp])
+            for vp in ancs:
+                res += f"edge({vp},{v}).\n"
+        return res
+
+    def compute_backdoor(self, idx):
+        comp = self._condensation.nodes[idx]["members"]
+        local_dep = self.dep.subgraph(comp)
+        try:
+            if len(comp) > 100:
+                basis = nx.cycle_basis(local_dep.to_undirected())
+                res = []
+                while len(basis) > 0:
+                    prog = f"b({len(comp)//2}).\n" + "\n".join([f"p({v})." for v in comp if v not in res]) + "\n"
+                    for c in basis:
+                        prog += ":-" + ", ".join([f"not abs({v})" for v in c]) + ".\n"
+                    c = backdoor.ClingoControl(prog)
+                    res += c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_backdoor.lp")[2][0]
+                    local_dep = self.dep.subgraph([x for x in comp if x not in res])
+                    basis = nx.cycle_basis(local_dep.to_undirected())
+            else:
+                try:
+                    c = backdoor.ClingoControl(f"b({len(comp)//2}).\n" + self.write_scc(comp))
+                    res = c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_tree.lp")[2][0]
+                except:
+                    basis = nx.cycle_basis(local_dep.to_undirected())
+                    res = []
+                    while len(basis) > 0:
+                        prog = "\n".join([f"p({v})." for v in comp if v not in res]) + "\n"
+                        for c in basis:
+                            prog += ":-" + ", ".join([f"not abs({v})" for v in c]) + ".\n"
+                        c = backdoor.ClingoControl(prog)
+                        res += c.get_backdoor(os.path.dirname(os.path.abspath(__file__)) + "/guess_backdoor.lp")[2][0]
+                        local_dep = self.dep.subgraph([x for x in comp if x not in res])
+                        basis = nx.cycle_basis(local_dep.to_undirected())
+        except:
+            res = comp
+            logger.error("backdoor guessing failed, returning whole component.")
+        print("backdoor comp: " + str(len(comp)))
+        print("backdoor res: " + str(len(res)))
+        return res
+
+    def backdoor_process(self, comp, backdoor):
+        comp = set(comp)
+        backdoor = set(backdoor)
+
+        toRemove = set()
+        ins = {}
+        for a in comp:
+            ins[a] = set()
+        for r in self._program:
+            for a in r.head:
+                if a in comp:
+                    ins[a].add(r)
+                    toRemove.add(r)
+
+        copies = {}
+        for a in comp:
+            copies[a] = {}
+            copies[a][len(backdoor)] = a
+
+        def getAtom(atom, i):
+            # negated atoms are kept as they are
+            if atom < 0:
+                return atom
+            # atoms that are not from this component are input atoms and should stay the same
+            if atom not in comp:
+                return atom
+            if i < 0:
+                print("this should not happen")
+                exit(-1)
+            if atom not in copies:
+                print("this should not happen")
+                exit(-1)
+            if i not in copies[atom]:
+                copies[atom][i] = self.copy_var(atom)
+                self._deriv.add(copies[atom][i])
+            return copies[atom][i]
+
+        toAdd = set()
+        for a in backdoor:
+            for i in range(1,len(backdoor)+1):
+                head = [getAtom(a, i)]
+                for r in ins[a]:
+                    if i == 1:
+                        # in the first iteration we do not add rules that use atoms from the backdoor
+                        add = True
+                        for x in r.body:
+                            if x > 0 and x in backdoor:
+                                add = False
+                    else:
+                        # in all but the first iteration we only use rules that use at least one atom from the SCC we are in
+                        add = False
+                        for x in r.body:
+                            if x > 0 and x in comp:
+                                add = True
+                    if add:
+                        body = [getAtom(x, i - 1) for x in r.body]
+                        new_rule = Rule(head, body)
+                        toAdd.add(new_rule)
+                if i > 1:
+                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
+
+        for a in comp.difference(backdoor):
+            for i in range(len(backdoor)+1):
+                head = [getAtom(a, i)]
+                for r in ins[a]:
+                    if i == 0:
+                        # in the first iteration we only add rules that only use atoms from outside 
+                        add = True
+                        for x in r.body:
+                            if x > 0 and x in backdoor:
+                                add = False
+                    else:
+                        # in all other iterations we only use rules that use at least one atom from the SCC we are in
+                        add = False
+                        for x in r.body:
+                            if x >  0 and x in comp:
+                                add = True
+                    if add:
+                        body = [getAtom(x, i) for x in r.body]
+                        new_rule = Rule(head, body)
+                        toAdd.add(new_rule)
+                if i > 0:
+                    toAdd.add(Rule(head, [getAtom(a, i - 1)]))
+
+        #print(toAdd)
+        self._program = [r for r in self._program if r not in toRemove]
+        self._program += list(toAdd)
+        
+        
+    def preprocess(self):
+        self._computeComponents()
+        self.treeprocess()
+        self._computeComponents()
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            if len(comp) > 1:
+                self.backdoor_process(comp, self.compute_backdoor(t))
+        self._computeComponents()
+        self.treeprocess()
+        self._computeComponents()
+        ts = nx.topological_sort(self._condensation)
+        for t in ts:
+            comp = self._condensation.nodes[t]["members"]
+            if len(comp) > 1:
+                print("this should not happen")
+                exit(-1)
+
+    def clark_completion(self):
+        perAtom = {}
+        for a in self._deriv:
+            perAtom[a] = []
+
+        for r in self._program:
+            for a in r.head:
+                perAtom[a].append(r)
+
+        for head in self._deriv:
+            ors = []
+            for r in perAtom[head]:
+                ors.append(self.new_var(f"{r}"))
+                ands = [-x for x in r.body]
+                self._clauses.append([ors[-1]] + ands)
+                for at in ands:
+                    self._clauses.append([-ors[-1], -at])
+            self._clauses.append([-head] + [o for o in ors])
+            for o in ors:
+                self._clauses.append([head, -o])
+
+        constraints = [r for r in self._program if len(r.head) == 0]
+        for r in constraints:
+            self._clauses.append([-x for x in r.body])
 
     def _generatePrimalGraph(self):
         self._graph = hypergraph.Hypergraph()
-        self._program = []
-        self._atomToVertex = {} # htd wants succinct numbering of vertices / no holes
-        self._vertexToAtom = {} # inverse mapping of _atomToVertex 
-        self._max = 0
-        self._nameMap = {}
-        unary = []
-        for o in self.control.ground_program.objects:
-            if isinstance(o, ClingoRule):
-                o.atoms = set(o.head)
-                o.atoms.update(tuple(map(abs, o.body)))
-                self._program.append(o)
-                if len(o.atoms) > 1:
-                    for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                        self._atomToVertex[a] = self.new_var(str(a))
-                        self._vertexToAtom[self._max] = a
-                    self._graph.add_hyperedge(tuple(map(lambda x: self._atomToVertex[x], o.atoms)))
-                else:
-                    unary.append(o)
-        for o in unary:
-            for a in o.atoms.difference(self._atomToVertex):	# add mapping for atom not yet mapped
-                self._atomToVertex[a] = self.new_var(str(a))
-                self._vertexToAtom[self._max] = a
-        #for sym in self.control.symbolic_atoms:
-        #    print(self._atomToVertex[sym.literal], sym.symbol)
-        #    print(sym.literal, sym.symbol)
-
+        for r in self._program:
+            atoms = set(r.head)
+            atoms.update(tuple(map(abs, r.body)))
+            self._graph.add_hyperedge(tuple(atoms), checkSubsumes = not self.no_sub)
 
     def _decomposeGraph(self):
         # Run htd
-        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        #logger.info("Parsing input file")
-        #input = problem.prepare_input(file)
-        #if "gr_file" in kwargs and kwargs["gr_file"]:
-        #    logger.info("Writing graph file")
-        #    with FileWriter(kwargs["gr_file"]) as fw:
-        #        fw.write_gr(*input)
-        logger.info("Running htd")
-        #with open('graph.txt', mode='wb') as file_out:
-        #    self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
-        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
+        p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr", "--child-limit", "2"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw", print_id = False)
         p.stdin.close()
         tdr = reader.TdReader.from_stream(p.stdout)
         p.wait()
-        logger.info("TD computed")
         self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
-        logger.info(self._td.nodes)
 
+    def td_guided_clark_completion(self):
+        self._generatePrimalGraph()
+        self._decomposeGraph()
 
-    # write a single clause
-    # connective == 0 -> and, == 1 -> or, == 2 -> impl, == 3 -> iff, == 4 -> *, == 5 -> +
-    def clause_writer(self, p, c1 = 0, c2 = 0, connective = 0):
-        if c1 == 0:
-            c1 = self.new_var(f"{p}'sc[0]")
-        if c2 == 0:
-            c2 = self.new_var(f"{p}'sc[1]")
-        if connective == 0:
-            self._clauses.append([-p, c1])
-            self._clauses.append([-p, c2])
-            self._clauses.append([p, -c1, -c2])
-        if connective == 1:
-            self._clauses.append([p, -c1])
-            self._clauses.append([p, -c2])
-            self._clauses.append([-p, c1, c2])
-        if connective == 2:
-            self._clauses.append([p, c1])
-            self._clauses.append([p, -c2])
-            self._clauses.append([-p, -c1, c2])
-        if connective == 3:
-            c = self.clause_writer(p, c1 = self.new_var(f"{c1}->{c2}"), c2 = self.new_var(f"{c2}->{c1}"))
-            self.clause_writer(c[0], c1 = c1, c2 = c2, connective = 2)
-            self.clause_writer(c[1], c1 = c2, c2 = c1, connective = 2)
-        if connective == 4:
-            self._clauses.append([-p, c1])
-            self._clauses.append([-p, c2])
-            self._clauses.append([p, -c1])
-            self._clauses.append([p, -c2])
-        if connective == 5:
-            self._clauses.append([p, -c1])
-            self._clauses.append([p, -c2])
-            self._clauses.append([-p, c1, c2])
-            self._clauses.append([-p, -c1, -c2])
-        return (c1, c2)
-
-    # a subroutine to generate x < x'
-    def generateLessThan(self, x, xp, node, myId):
-        count = self.bits[node][0]
-        l_bits = self.bits[node][1]
-        # remember all the disjuncts here
-        include = []
-        for i in range(count):
-            include.append(self.new_var(f"disj_{i}"))
-            c = self.clause_writer(include[-1], c1 = l_bits[xp][i], c2 = self.new_var(f"{x}<_{node}{xp}V{i}w2"))                               # new_var <-> b_x'^i && c[1]
-            c = self.clause_writer(c[1], c1 = -l_bits[x][i], c2 = self.new_var(f"{x}<_{node}{xp}V{i}w3"))                                    # c[1] <-> -b_x^i && c[1]
-            for j in range(i + 1, count):
-                c = self.clause_writer(c[1], c1 = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}0"), c2 = self.new_var(f"{x}<_{node}{xp}V{i}w3W{j}1"))                                                    # c[1] <-> c[0] && c[1]    
-                self.clause_writer(c[0], c1 = l_bits[x][j], c2 = l_bits[xp][j], connective = 2) # c[0] <-> b_x^j -> b_x'^j
-            self._clauses.append([c[1]])
-
-        # make sure that the disjunction is not trivially satisfied
-        self._clauses.append([-myId] + include)                                                 # myId <-> new_var_1 || ... || new_var_n
-        for v in include:
-            self._clauses.append([myId, -v])
-                         
-
-    def _tdguidedReduction(self):
-        # which variables NOT to project away
-        self._projected_cutoff = self._max
-        # store the clauses here
-        self._clauses = []
-        # maps a node t to a set of atoms a for which we require p_t^a or p_{<=t}^a variables for t
-        # this is the case if there is a rule suitable for proving a in or below t
-        prove_atoms = {}
-        proven_at_atoms = {}
-        proven_below_atoms = {}
-        # remember which atoms we used for the bits 
-        self.bits = {}
-        # maps a node t to a set of rules that need to be considered in t
-        # it actually suffices if every rule is considered only once in the entire td..
+        # at which td node to handle each rule
         rules = {}
-        # temporary copy of the program, will be empty after the first pass
-        program = list(self._program)
+        # at which td node each variable occurs first
+        last = {}
+        tree = nx.DiGraph()
+        tree.add_nodes_from(range(len(self._td.nodes)))
+        idx = 0
+        td_idx = self._td.nodes
+        for t in self._td.nodes:
+            for a in t.vertices:
+                last[a] = idx
+            t.idx = idx
+            for tp in t.children:
+                tree.add_edge(t.idx, tp.idx)
+            idx += 1
+            rules[t] = []
+
+        for r in self._program:
+            for a in r.head:
+                r.proven = self.new_var(f"{r}")
+                ands = [-x for x in r.body]
+                self._clauses.append([r.proven] + ands)
+                for at in ands:
+                    self._clauses.append([-r.proven, -at])
+            idx = min([last[abs(b)] for b in r.body + r.head])
+            rules[td_idx[idx]].append(r)
+
+        # how many rules have we used and what is the last used variable
+        unfinished = {}
         # first td pass: determine rules and prove_atoms
         for t in self._td.nodes:
-            prove_atoms[t] = set()
-            rules[t] = []
-            proven_below_atoms[t] = {}
-            proven_at_atoms[t] = {}
-            # compute t.atoms
-            t.atoms = set(map(lambda x: self._vertexToAtom[x], t.vertices))
-            # generate the variables for the bits for each atom of the node
-            count = math.ceil(math.log(max(len(t.atoms), 2), 2))
-            self.bits[t] = (count, {})
-            for a in t.atoms:
-                self.bits[t][1][a] = []
-                #self.bits[t][1][a] = list(range(self._max + 1, self._max + count + 1))
-                #self._max += count
-                for i in range(count):
-                    self.bits[t][1][a].append(self.new_var(f"b_{a}_{t}^{i}"))
-            # we require prove_atoms for t if it is contained in the bag and among prove_atoms of some child node
+            unfinished[t] = {}
+            t.vertices = set(t.vertices)
+            to_handle = {}
+            for a in t.vertices:
+                to_handle[a] = []
             for tp in t.children:
-                prove_atoms[t].update(prove_atoms[tp].intersection(t.atoms))
-                for a in prove_atoms[tp].intersection(t.atoms):
-                    if a not in proven_below_atoms[t]:
-                        proven_below_atoms[t][a] = self.new_var(f"p_<{t}^{a}");
+                removed = tp.vertices.difference(t.vertices)
+                for a in removed:
+                    if a in self._deriv:
+                        if a in unfinished[tp]:
+                            final = unfinished[tp].pop(a)
+                            self._clauses.append([-a, final])
+                            self._clauses.append([a, -final])
+                        else: 
+                            self._clauses.append([-a])
+                rest = tp.vertices.intersection(t.vertices)
+                for a in rest:
+                    if a in unfinished[tp]:
+                        to_handle[a].append(unfinished[tp][a])
             # take the rules we need and remove them
-            rules[t] = [r for r in program if r.atoms.issubset(t.atoms)]
-            program = [r for r in program if not r.atoms.issubset(t.atoms)]
             for r in rules[t]:
-                prove_atoms[t].update(r.head)
                 for a in r.head:
-                    if a not in proven_at_atoms[t]:
-                        proven_at_atoms[t][a] = self.new_var(f"p_{t}^{a}")
-                    if a not in proven_below_atoms[t]:
-                        proven_below_atoms[t][a] = self.new_var(f"p_<{t}^{a}");
+                    to_handle[a].append(r.proven)
 
-        #take care of the remaining unary rules
-        for r in program:
-            if not r.choice: # FIXME: is this really all we need to do to make sure that choice rules are handled correctly?
-                self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
+            # handle all the atoms we have gathered
+            for a in t.vertices:
+                if len(to_handle[a]) > 1:
+                    new_last = self.new_var("{t},{a}")
+                    self._clauses.append([-new_last] + to_handle[a])
+                    for at in to_handle[a]:
+                        self._clauses.append([new_last, -at])
+                    unfinished[t][a] = new_last
+                elif len(to_handle[a]) == 1:
+                    unfinished[t][a] = to_handle[a][0]
 
-        logger.info("program")
-        logger.info(rules)
-        logger.info("prove_atoms")
-        logger.info(prove_atoms)
-        # second td pass: use rules and prove_atoms to generate the reduction
-        for t in self._td.nodes:
-            # generate (1) the clauses for the rules in the current node
-            for r in rules[t]:
-                if not r.choice: # FIXME: is this really all we need to do to make sure that choice rules are handled correctly?
-                    self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
+        for a in self._td.root.vertices:
+            if a in self._deriv:
+                if a in unfinished[self._td.root]:
+                    final = unfinished[self._td.root].pop(a)
+                    self._clauses.append([-a, final])
+                    self._clauses.append([a, -final])
+                else: 
+                    self._clauses.append([-a])
 
-            # generate (2), i.e. the constraints that maintain the inequalities between nodes
-            for tp in t.children:
-                relevant = tp.atoms.intersection(t.atoms)
-                # FIXME: can we leave out everything below the diagonal?
-                for x, xp in product(relevant, relevant):
-                    if x == xp:
-                        continue
-                    var = self.new_var(f"{x}<_{t}{xp}iff{x}<_{tp}{xp}")
-                    self._clauses.append([var])              # new_var
-                    c = self.clause_writer(var, c1 = self.new_var(f"{x}<_{t}{xp}"), c2 = self.new_var(f"{x}<_{tp}{xp}"), connective = 3)   # new_var <-> c[0] <-> c[1]
-                    self.generateLessThan(x, xp, t, c[0])               # c[0] <-> x <_t x'
-                    self.generateLessThan(x, xp, tp, c[1])              # c[1] <-> x <_t' x'
-            
-            # generate (3), i.e. the constraints that ensure that true atoms that are removed are proven
-            for tp in t.children: 
-                relevant = tp.atoms.difference(t.atoms)
-                for a in relevant:
-                    if a in proven_below_atoms[tp]:
-                        var = self.new_var("true")
-                        self._clauses.append([var])                                                                      # new_var
-                        self.clause_writer(var, c1 = self._atomToVertex[a], c2 = proven_below_atoms[tp][a], connective = 2)   # new_var <-> x -> p_{<t'}^x
-                    else:
-                        # if we do not have a possibility to prove that a is stable, we can assert it to be false
-                        self._clauses.append([-self._atomToVertex[a]])
-            
-            # generate (5), i.e. the propogation of things that were proven
-            for a in prove_atoms[t]:
-                var = self.new_var("true")
-                self._clauses.append([var])                                              # new_var
-                c = self.clause_writer(var, c1 = proven_below_atoms[t][a], c2 = self.new_var(f"prooffor{a}below{t}"), connective = 3)    # new_var <-> p_{<t}^x <-> c[1]
-                include = []
-                if a in proven_at_atoms[t]:
-                    include.append(proven_at_atoms[t][a])
-                for tp in t.children:
-                    if a in proven_below_atoms[tp]:
-                        include.append(proven_below_atoms[tp][a])
-                self._clauses.append([-c[1]] + include)                                             # c[1] <-> p_t^x || p_t1^x || ... || p_tn^x
-                for v in include:
-                    self._clauses.append([c[1], -v])
+        constraints = [r for r in self._program if len(r.head) == 0]
+        for r in constraints:
+            self._clauses.append([-x for x in r.body])
 
-            # generate (6), i.e. the check for whether an atom was proven at the current node
-            for x in proven_at_atoms[t]:
-                var = self.new_var("true")
-                self._clauses.append([var])                                              # new_var
-                c = self.clause_writer(var, c1 = proven_at_atoms[t][x], c2 = self.new_var(f"prooffor{x}at{t}"), connective = 3)       # new_var <-> p_t^x <-> c[1]
-                include = []
-                for r in rules[t]:
-                    if x in r.head:
-                        cur = self.new_var(f"{x} proven by {r} at {t}")
-                        include.append(cur)                                              # new_var_i
-                        for a in r.body:
-                            if a > 0:
-                                cp = self.clause_writer(cur, c1 = self._atomToVertex[a])            # cur <-> a && c'[1]
-                                # FIXME: can this not be moved outside? 
-                                # cp = self.clause_writer(cp[1], c1 = self._atomToVertex[x])                              # c'[1] <-> x && c'[1]
-                                cp = self.clause_writer(cp[1])                                      # c'[1] <-> c'[0] && c'[1] 
-                                self.generateLessThan(a, x, t, cp[0])                               # c'[0] <-> a <_t x
-                                cur = cp[1]
-                            if a < 0 and a != -x:
-                                cp = self.clause_writer(cur, c1 = -self._atomToVertex[-a])          # cur <-> -b && c'[1]
-                                cur = cp[1]
-                        for a in r.head:
-                            if a != x:
-                                cp = self.clause_writer(cur, c1 = -self._atomToVertex[a])           # cur <-> - b && c'[1]
-                                cur = cp[1]
-                        # TODO: cheeck in detail if this is correct
-                        self._clauses.append([cur])
-                self._clauses.append([-c[1]] + include)                                             # c[1] <-> new_var_1 || ... || new_var_n
-                for v in include:
-                    self._clauses.append([c[1], -v])
-            
-        # generate (4), i.e. the constraints that ensure that true atoms in the root are proven
-        for a in self._td.root.atoms:
-            if a in proven_below_atoms[self._td.root]:
-                var = self.new_var("true")
-                self._clauses.append([var])
-                self.clause_writer(var, c1 = self._atomToVertex[a], c2 = proven_below_atoms[self._td.root][a], connective = 2)
-            else:
-                self._clauses.append([-self._atomToVertex[a]])
-
-
-    # function for debugging
-    def model_to_names(self):
-        f = open("model.out")
-        f.readline()
-        vs = [int(x) for x in f.readline().split()]
-        for v in vs:
-            print(("-" if v < 0 else "")+self._nameMap[abs(v)])
-
-    def write_dimacs(self, stream):
+    def write_dimacs(self, stream, debug = False):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
-        stream.write(("pv " + " ".join([str(v) for v in range(1, self._projected_cutoff + 1)]) + " 0\n" ).encode())
-        for c in self._clauses:
-            stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
-            #print(" ".join([self._nameMap[v] if v > 0 else f"-{self._nameMap[abs(v)]}" for v in c]))
-        #for (a, w) in self._weights.items():
-        #    stream.write(f"w {a} {w}\n".encode())
-        
+        if debug:
+            for c in self._clauses:
+                stream.write((" ".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in c]) + " 0\n" ).encode())
+        else:
+            for c in self._clauses:
+                stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
+
+    def prog_string(self, program, problog=False):
+        result = ""
+        for v in self._guess:
+            if problog:
+                result += f"0.5::{self._nameMap[v]}.\n"
+            else:
+                result += f"{{{self._nameMap[v]}}}.\n"
+        for r in program:
+            result += ";".join([self._nameMap[v] for v in r.head])
+            result += ":-"
+            result += ",".join([("not " if v < 0 else "") + self._nameMap[abs(v)] for v in r.body])
+            result += ".\n"
+        if problog:
+            result += "query(smokes(X))."
+        return result
+
+    def write_prog(self, stream):
+        stream.write(self.prog_string(self._program, False).encode())
+
     def encoding_stats(self):
         num_vars, edges= cnf2primal(self._max, self._clauses)
         p = subprocess.Popen([os.path.join(src_path, "htd/bin/htd_main"), "--seed", "12342134", "--input", "hgr"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -373,45 +562,103 @@ class Application(object):
         logger.debug("Parsing tree decomposition")
         td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {td.num_bags} tree_width: {td.tree_width} #vertices: {td.num_orig_vertices} #leafs: {len(td.leafs)} #edges: {len(td.edges)}")
-                    
-
-    def main(self, clingo_control, files):
-        """
-        Entry point of the application registering the propagator and
-        implementing the standard ground and solve functionality.
-        """
-        if not files:
-            files = ["-"]
-
-        self.control = clingoext.Control()
-
-        for path in files:
-            self.control.add("base", [], self._read(path))
-
-        self.control.ground()
-
-        logger.info("------------------------------------------------------------")
-        logger.info("   Grounded Program")
-        logger.info("------------------------------------------------------------")
-        #pprint(self.control.ground_program.objects)
-        logger.info("------------------------------------------------------------")
-        logger.info(self.control.ground_program)
-        logger.info("------------------------------------------------------------")
-
-        self._generatePrimalGraph()
-        logger.info(self._graph.edges())
-
-
-        self._decomposeGraph()
-        self._tdguidedReduction()
-        #parser = wfParse.WeightedFormulaParser()
-        #sem = wfParse.WeightedFormulaSemantics(self)
-        #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
-        #parser.parse(wf, semantics = sem)
-        with open('out.cnf', mode='wb') as file_out:
-            self.write_dimacs(file_out)
-        #self.model_to_names()
-        self.encoding_stats()
-
+            
 if __name__ == "__main__":
-    sys.exit(int(clingoext.clingo_main(Application(), sys.argv[1:])))
+    control = clingoext.Control()
+    mode = sys.argv[1]
+    weights = {}
+    no_sub = False
+    no_pp = False
+    if len(sys.argv) > 2 and sys.argv[2] == "-no_subset_check":
+        logger.info("   Not performing subset check when adding edges to hypergraph.")
+        no_sub = True
+        del sys.argv[2]
+    elif len(sys.argv) > 2 and sys.argv[2] == "-no_pp":
+        logger.info("   No Preprocessin")
+        no_pp = True
+        del sys.argv[2]
+    if mode == "asp":
+        program_files = sys.argv[2:]
+        program_str = None
+        if not program_files:
+            program_str = sys.stdin.read()
+    elif mode.startswith("problog"):
+        files = sys.argv[2:]
+        program_str = ""
+        if not files:
+            program_str = sys.stdin.read()
+        for path in files:
+            with open(path) as file_:
+                program_str += file_.read()
+        parser = ProblogParser()
+        program = parser.parse(program_str, semantics = ProblogSemantics())
+
+        queries = [ r for r in program if r.is_query() ]
+        program = [ r for r in program if not r.is_query() ]
+
+        for r in program:
+            if r.probability is not None:
+                weights[str(r.head)] = float(r.probability)
+
+        program_str = "".join([ r.asp_string() for r in program])
+        program_files = []
+    grounder.ground(control, program_str = program_str, program_files = program_files)
+    program = Program(control)
+    program.no_sub = no_sub
+
+    logger.info("   Stats Original")
+    logger.info("------------------------------------------------------------")
+    program._generatePrimalGraph()
+    program._decomposeGraph()
+    logger.info("------------------------------------------------------------")
+
+    if no_pp:
+        with open('out.lp', mode='wb') as file_out:
+            program.write_prog(file_out)
+            exit(0)
+
+    program.preprocess()
+    logger.info("   Preprocessing Done")
+    logger.info("------------------------------------------------------------")
+    
+    with open('out.lp', mode='wb') as file_out:
+        program.write_prog(file_out)
+    #program.clark_completion()
+    logger.info("   Stats translation")
+    logger.info("------------------------------------------------------------")
+    program.td_guided_clark_completion()
+    logger.info("------------------------------------------------------------")
+
+    with open('out.cnf', mode='wb') as file_out:
+        program.write_dimacs(file_out)
+
+    #logger.info("   Stats CNF")
+    #logger.info("------------------------------------------------------------")
+    #program.encoding_stats()
+    if mode != "problogwmc":
+        exit(0)
+    logger.info("------------------------------------------------------------")
+    p = subprocess.Popen([os.path.join(src_path, "c2d/bin/c2d_linux"), "-smooth_all", "-reduce", "-in", "out.cnf"], stdout=subprocess.PIPE)
+    p.wait()
+    import circuit
+    if mode == "asp":
+        weight_list = [ np.array([1.0]) for _ in range(program._max*2) ]
+    elif mode.startswith("problog"):
+        query_cnt = len(queries)
+        varMap = { name : var for  var, name in program._nameMap.items() }
+        weight_list = [ np.full(query_cnt, 1.0) for _ in range(program._max*2) ]
+        for name in weights:
+            weight_list[(varMap[name]-1)*2] = np.full(query_cnt, weights[name])
+            weight_list[(varMap[name]-1)*2 + 1] = np.full(query_cnt, 1.0 - weights[name])
+        for i, query in enumerate(queries):
+            atom = str(query.atom)
+            weight_list[(varMap[atom]-1)*2 + 1][i] = 0.0
+    logger.info("   Results")
+    logger.info("------------------------------------------------------------")
+    results = circuit.Circuit.parse_wmc("out.cnf.nnf", weight_list)
+    if mode == "asp":
+        logger.info(f"The program has {int(results[0])} models")
+    elif mode.startswith("problog"):
+        for i, query in enumerate(queries):
+            atom = str(query.atom)
+            logger.info(f"{atom}: {' '*max(1,(20 - len(atom)))}{results[i]}")

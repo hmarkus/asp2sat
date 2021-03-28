@@ -1,0 +1,10 @@
+out.cnf
+out.lp
+out.gr
+out.png
+out.dot
+out_simp.cnf
+dbg.cnf
+dbg.gr
+*__pycache__*
+*.swp

@@ -1,9 +1,12 @@
 [submodule "lib/htd_validate"]
 	path = lib/htd_validate
-	url = git@github.com:daajoe/htd_validate.git
+	url = https://github.com/raki123/htd_validate
 [submodule "lib/nesthdb"]
 	path = lib/nesthdb
 	url = https://github.com/hmarkus/dp_on_dbs/
 [submodule "lib/htd"]
 	path = lib/htd
 	url = https://github.com/TU-Wien-DBAI/htd
+[submodule "lib/aspmc_benchmarks"]
+	path = lib/aspmc_benchmarks
+	url = https://github.com/raki123/aspmc_benchmarks
