@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.realpath(os.path.join(src_path, '../..')))
 
 src_path = os.path.realpath(os.path.join(src_path, '../../lib'))
 
-libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd', 'minic2d', 'c2d']
+libs = ['htd_validate', 'clingoparser', 'nesthdb', 'htd', 'c2d']
 
 if src_path not in sys.path:
     for lib in libs:
