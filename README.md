@@ -42,7 +42,7 @@ python bin/main.py <MODE> [OPTIONS] [<INPUT-FILES>]
 ```
 Here, `<MODE>` must be one of
 * `asp`: read a (possibly non-ground) normal answer set program and write a cnf with the same number of models to the file `out.cnf`
-* `problog`: read a ground probabilistic program in [Problog]() syntax and write a cnf with the same number of models to the file `out.cnf`
+* `problog`: read a ground probabilistic program in [Problog](https://dtai.cs.kuleuven.be/problog/index.html) syntax and write a cnf with the same number of models to the file `out.cnf`
 * `problogwmc`: the same as `problog` mode, but after writing `out.cnf` we automatically use c2d (if provided by the user) to compute a d-DNNF representation of the it and compute the answers to the probabilistic queries included in the input program
 
 The following options are accepted:
