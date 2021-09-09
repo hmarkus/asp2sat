@@ -1,3 +1,4 @@
+#!/home/hecher/miniconda3/bin/python3
 """
 Main module providing the application logic.
 """
@@ -33,6 +34,7 @@ if src_path not in sys.path:
     for lib in libs:
         sys.path.insert(0, os.path.join(src_path, lib))
 
+#print(sys.path)
 
 logger = logging.getLogger("asp2sat")
 logging.basicConfig(format='[%(levelname)s] %(name)s: %(message)s', level="INFO")
@@ -47,7 +49,7 @@ from dpdb import treedecomp
 from dpdb.problems.sat_util import *
 from dpdb.writer import StreamWriter
 
-import wfParse
+#import wfParse
 
 class AppConfig(object):
     """
@@ -141,14 +143,17 @@ class Application(object):
     def _computeComponents(self):
         self.dep = nx.DiGraph()
         for r in self.control.ground_program.objects:
+            #print(r)
             if isinstance(r, ClingoRule):
                 for a in r.head:
                     for b in r.body:
                         if b > 0:
                             self.dep.add_edge(a, b)
+        #print(self.dep)
         comp = nx.algorithms.strongly_connected_components(self.dep)
         self._components = list(comp)
         self._condensation = nx.algorithms.condensation(self.dep, self._components)
+        #print(self._components)
 
 
     def _decomposeGraph(self):
@@ -165,12 +170,13 @@ class Application(object):
         #    self._graph.write_graph(file_out, dimacs=False, non_dimacs="tw")
         self._graph.write_graph(p.stdin, dimacs=False, non_dimacs="tw")
         p.stdin.close()
+        #print(p.stdout.readlines())
         tdr = reader.TdReader.from_stream(p.stdout)
         p.wait()
         logger.info("TD computed")
         self._td = treedecomp.TreeDecomp(tdr.num_bags, tdr.tree_width, tdr.num_orig_vertices, tdr.root, tdr.bags, tdr.adjacency_list, None)
         logger.info(f"Tree decomposition #bags: {self._td.num_bags} tree_width: {self._td.tree_width} #vertices: {self._td.num_orig_vertices} #leafs: {len(self._td.leafs)} #edges: {len(self._td.edges)}")
-        logger.info(self._td.nodes)
+        #logger.info(self._td.nodes)
 
 
     # write a single clause
@@ -344,7 +350,7 @@ class Application(object):
                 self._clauses.append(list(map(lambda x: self._atomToVertex[abs(x)]*(-1 if x < 0 else 1), r.head + [-x for x in r.body])))
 
         logger.info("program")
-        logger.info(rules)
+        #logger.info(rules)
         # second td pass: use rules and prove_atoms to generate the reduction
         for t in self._td.nodes:
             # generate (1) the clauses for the rules in the current node
@@ -420,11 +426,12 @@ class Application(object):
             #    file_out.write(" ".join([str(-v) for v in vs]) + " 0\n")
             #for v in vs:
             #    print(("-" if v < 0 else "")+getName(self._vertexToAtom[abs(v)]))
+            
             print(":-" + ", ".join([("not " if v > 0 else "") + getName(self._vertexToAtom[abs(v)]) for v in vs]) + ".")
 
     def write_dimacs(self, stream):
         stream.write(f"p cnf {self._max} {len(self._clauses)}\n".encode())
-        stream.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
+        stream.write(("c pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
         #f = open("named.cnf", "w")
         for c in self._clauses:
             stream.write((" ".join([str(v) for v in c]) + " 0\n" ).encode())
@@ -460,7 +467,10 @@ class Application(object):
             file_out.write(("pv " + " ".join([str(v) for v in self._projected]) + " 0\n" ).encode())
 
     def stats(self):
-        largest = max(self._components, key=len)
+        if len(self._components) > 0:
+            largest = max(self._components, key=len)
+        else:
+            largest = []
         logger.info(f"Largest CC has size {len(largest)}")
         # comment out to see plots of the dependency graph
         #alle = set.union(*self._components)
@@ -475,7 +485,10 @@ class Application(object):
         sum_max = 0
         for t in self._td.nodes:
             local_comp = [set(c).intersection(t.atoms) for c in self._components]
-            here_max = len(max(local_comp, key=len))
+            if len(local_comp) > 0:
+                here_max = len(max(local_comp, key=len))
+            else:
+                here_max = 0
             local_max = max(local_max, here_max)
             sum_max += here_max
 
@@ -518,17 +531,18 @@ class Application(object):
         logger.info("------------------------------------------------------------")
         #pprint(self.control.ground_program.objects)
         logger.info("------------------------------------------------------------")
-        logger.info(self.control.ground_program)
+        #logger.info(self.control.ground_program)
         logger.info("------------------------------------------------------------")
         
         self._computeComponents();
 
         self._generatePrimalGraph()
-        logger.info(self._graph.edges())
+        #logger.info(self._graph.edges())
 
 
         self._decomposeGraph()
-        self._tdguidedReduction(local = False)
+        self._tdguidedReduction(local = True)
+        #self._tdguidedReduction(local = False)
         #parser = wfParse.WeightedFormulaParser()
         #sem = wfParse.WeightedFormulaSemantics(self)
         #wf = "#(1)*(pToS(1)*#(0.3) + npToS(1)*#(0.7))*(pToS(2)*#(0.3) + npToS(2)*#(0.7))*(pToS(3)*#(0.3) + npToS(3)*#(0.7))*(fToI(1,2)*#(0.8215579576173441) + nfToI(1,2)*#(0.17844204238265593))*(fToI(2,1)*#(0.2711032358362575) + nfToI(2,1)*#(0.7288967641637425))*(fToI(2,3)*#(0.6241213691538402) + nfToI(2,3)*#(0.3758786308461598))*(fToI(3,1)*#(0.028975606030084644) + nfToI(3,1)*#(0.9710243939699154))*(fToI(3,2)*#(0.41783665133679737) + nfToI(3,2)*#(0.5821633486632026))"
@@ -536,8 +550,9 @@ class Application(object):
         #self.encoding_stats()
         #self.simp()
         #self.my_write()
-        with open('out.cnf', mode='wb') as file_out:
-            self.write_dimacs(file_out)
+        # OUTPUT
+        #with open('out.cnf', mode='wb') as file_out:
+        #    self.write_dimacs(file_out)
         #self.model_to_names()
         self.stats()
 
